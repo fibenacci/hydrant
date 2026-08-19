@@ -55,6 +55,39 @@ sdk/php/         sender SDK
 projection and hashing pure and property-testable, and lets the CLI use them without a
 database. Do not add `sqlx`, `axum` or `tokio` to it.
 
+## Running locally
+
+Three prerequisites, all cross-platform:
+
+- **Rust** via [rustup](https://rustup.rs/). The toolchain itself is pinned in
+  `rust-toolchain.toml`, so `cargo` picks the right one on first invocation.
+- **A container runtime that reads the Compose specification** — Docker Desktop, Podman,
+  Colima, Rancher Desktop. The image is pinned to a multi-architecture index digest, so the
+  same `compose.yaml` runs natively on arm64 macOS, amd64 Linux and Windows/WSL2 without a
+  platform override.
+- **GNU make**, which drives every task. On Windows use WSL2 or Git Bash; the container
+  runtime can stay on the Windows side.
+
+```bash
+cp .env.example .env
+make db-up            # PostgreSQL, waits until it accepts connections
+make db-shell         # psql inside the container
+make db-down          # stop and drop the volume
+```
+
+The database listens on **5433** by default, not 5432, because that port is usually taken by
+another project's container or a native install. Override `HYDRANT_DB_PORT` and `DATABASE_URL`
+together if you want a different one.
+
+For Podman or any other runtime, override the compose command rather than editing the file:
+
+```bash
+make db-up COMPOSE="podman compose"
+```
+
+The service itself is not runnable yet — the binary arrives with `crates/server`. Until then
+`make db-up` is the whole local environment.
+
 ## Local checks
 
 Reproduce the CI pipeline before pushing:

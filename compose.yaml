@@ -1,0 +1,49 @@
+# Local dependencies for development. Requires nothing but a container runtime:
+#   make db-up      start PostgreSQL and wait until it accepts connections
+#   make db-down    stop it and drop the volume
+#
+# Written to the Compose specification, so `docker compose`, `podman compose` and
+# Rancher Desktop all read it unchanged. The image is pinned to an OCI index
+# digest, which resolves per architecture - the same line works on arm64 macOS,
+# amd64 Linux and Windows/WSL2 without a local override. Pin the *index* digest,
+# never the digest of a single manifest inside it: the latter pins one
+# architecture and forces emulation everywhere else. Read it from
+# `docker buildx imagetools inspect <image>` ("Digest:"), not from the first
+# entry of `docker manifest inspect -v`.
+#
+# No bind mounts: data lives in a named volume, which keeps the file permissions
+# and path semantics identical on all three platforms.
+
+name: hydrant
+
+services:
+    postgres:
+        image: postgres:18-alpine@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2
+        restart: unless-stopped
+        environment:
+            POSTGRES_DB: ${POSTGRES_DB:-hydrant}
+            POSTGRES_USER: ${POSTGRES_USER:-hydrant}
+            POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-hydrant}
+            # Deterministic collation, so an index built locally sorts like one
+            # built in CI or production.
+            POSTGRES_INITDB_ARGS: --locale=C --encoding=UTF8
+        ports:
+            # Host 5433 by default: 5432 is usually taken by another project's
+            # container or a native install. Override with HYDRANT_DB_PORT.
+            -   "${HYDRANT_DB_PORT:-5433}:5432"
+        volumes:
+            # PostgreSQL 18+ images store data in a major-version subdirectory of
+            # /var/lib/postgresql, so the mount goes one level above the old
+            # /var/lib/postgresql/data. Mounting the old path makes the image
+            # refuse to start. It also means `pg_upgrade --link` works later
+            # without crossing a mount boundary.
+            -   postgres-data:/var/lib/postgresql
+        healthcheck:
+            test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-hydrant} -d ${POSTGRES_DB:-hydrant}"]
+            interval: 2s
+            timeout: 3s
+            retries: 15
+            start_period: 5s
+
+volumes:
+    postgres-data:

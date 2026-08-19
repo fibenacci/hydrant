@@ -9,7 +9,7 @@ CARGO        ?= cargo
 # CI sets CARGO_LOCKED=--locked so a stale Cargo.lock fails the build instead of
 # being updated silently. Left empty locally, where updating it is the point.
 CARGO_LOCKED ?=
-DATABASE_URL ?= postgres://hydrant:hydrant@localhost:5432/hydrant
+DATABASE_URL ?= postgres://hydrant:hydrant@localhost:5433/hydrant
 ARGS         ?=
 
 export DATABASE_URL
@@ -108,6 +108,31 @@ build: ## Debug build of the whole workspace
 .PHONY: release
 release: ## Optimized release build
 	$(CARGO) build --release --workspace $(CARGO_LOCKED)
+
+# ---------------------------------------------------------------------------
+##@ Local environment
+# ---------------------------------------------------------------------------
+#
+# Any Compose-spec runtime works; override with COMPOSE="podman compose" if you
+# do not run Docker.
+
+COMPOSE ?= docker compose
+
+.PHONY: db-up
+db-up: ## Start PostgreSQL and wait until it accepts connections
+	$(COMPOSE) up -d --wait --quiet-pull
+
+.PHONY: db-down
+db-down: ## Stop PostgreSQL and drop its volume
+	$(COMPOSE) down -v
+
+.PHONY: db-logs
+db-logs: ## Follow the PostgreSQL log
+	$(COMPOSE) logs -f postgres
+
+.PHONY: db-shell
+db-shell: ## Open psql inside the container
+	$(COMPOSE) exec postgres psql -U $${POSTGRES_USER:-hydrant} -d $${POSTGRES_DB:-hydrant}
 
 # ---------------------------------------------------------------------------
 ##@ Housekeeping
