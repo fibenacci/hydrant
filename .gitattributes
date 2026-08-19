@@ -1,0 +1,17 @@
+# Normalize line endings on the way in; check out LF everywhere.
+* text=auto eol=lf
+
+*.rs   text diff=rust
+*.md   text diff=markdown
+*.toml text
+*.yml  text
+*.sql  text
+*.php  text
+
+# Generated, and reviewed as a whole rather than line by line.
+Cargo.lock linguist-generated=true -diff
+
+# Keep repository plumbing out of `git archive` tarballs.
+/.github        export-ignore
+/.gitattributes export-ignore
+/.editorconfig  export-ignore

@@ -1,0 +1,30 @@
+/target
+# Cargo.lock IS committed: hydrant ships a binary, so builds stay reproducible.
+**/*.rs.bk
+Cargo.lock.orig
+
+.env
+.env.*
+!.env.example
+
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+/data
+/tmp
+
+# Claude Code / local agent tooling — plans, sessions and indexes stay local
+CLAUDE.md
+CLAUDE.local.md
+.claude/
+.claudeignore
+.mcp.json
+.codegraph/
+
+# Coverage / profiling output
+*.profraw
+/coverage
+lcov.info
+*.pdb

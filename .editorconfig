@@ -1,0 +1,48 @@
+# editorconfig.org — keeps editors in sync so tab-vs-space never reaches a review.
+
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+indent_style = space
+indent_size = 4
+insert_final_newline = true
+trim_trailing_whitespace = true
+max_line_length = 100
+
+# Rust — rustfmt owns the details; these only keep editors from fighting it.
+[*.rs]
+indent_size = 4
+
+[*.{toml,ini,cfg}]
+indent_size = 4
+
+# YAML / JSON — 4 spaces, matching the CI workflows in .github/.
+[*.{json,yml,yaml}]
+indent_size = 4
+
+[*.{sh,bash}]
+indent_size = 4
+
+# Makefile NEEDS tabs — that's the spec, don't fight it.
+[{Makefile,*.mk,Makefile.*}]
+indent_style = tab
+
+# Markdown — trailing whitespace is a hard line break.
+[*.md]
+trim_trailing_whitespace = false
+max_line_length = off
+
+# SQL migrations and PHP in the sender SDK.
+[*.sql]
+indent_size = 4
+
+[*.php]
+indent_size = 4
+
+[{Cargo.lock,composer.lock,package-lock.json,*.lock}]
+indent_style = unset
+indent_size = unset
+insert_final_newline = unset
+trim_trailing_whitespace = unset
