@@ -76,14 +76,14 @@ security: deny ## Run every security gate
 .PHONY: test
 test: ## Run the test suite (nextest if available, else cargo test)
 	@if command -v cargo-nextest >/dev/null 2>&1; then \
-		$(CARGO) nextest run --workspace --no-tests=pass $(CARGO_LOCKED); \
+		$(CARGO) nextest run --workspace $(CARGO_LOCKED); \
 	else \
 		$(CARGO) test --workspace $(CARGO_LOCKED); \
 	fi
 
 .PHONY: test-junit
 test-junit: ## Run tests with the CI profile (emits JUnit report)
-	$(CARGO) nextest run --workspace --profile ci --no-tests=pass $(CARGO_LOCKED)
+	$(CARGO) nextest run --workspace --profile ci $(CARGO_LOCKED)
 
 .PHONY: doctest
 doctest: ## Run documentation tests
