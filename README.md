@@ -32,8 +32,11 @@ Consequences, all deliberate:
 
 ## Status
 
-Design stage — nothing is implemented yet. The architecture is settled; the design notes
-themselves stay in the author's working directory until there is code they describe.
+Early implementation. `crates/core` carries the parts the whole design rests on — RFC 8785
+canonicalisation, content hashing, and the projection engine that drops everything a
+collection schema does not name. There is no store and no HTTP surface yet, so nothing is
+servable.
+
 What the service guarantees is in [CONTRIBUTING.md](CONTRIBUTING.md#invariants); how it is
 built is in the [Makefile](Makefile).
 

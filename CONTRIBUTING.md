@@ -2,7 +2,8 @@
 
 hydrant is a source-agnostic ingest service: it accepts records from any external system
 over one canonical HTTP protocol and republishes an explicitly allow-listed subset through a
-cacheable public read API. It is at the design stage — the first code lands as `crates/core`.
+cacheable public read API. `crates/core` exists; the store, the HTTP surface and the CLI do not
+yet.
 
 Read the invariants below before proposing anything structural. They are not style
 preferences; each one exists because its absence produced a class of silent-data-loss or
