@@ -1,0 +1,32 @@
+name: Audit
+
+# The RustSec advisory database changes without this repository changing, so the
+# dependency audit runs on a schedule as well as in CI. A failure here means a new
+# advisory affects the committed Cargo.lock.
+on:
+    schedule:
+        -   cron: '0 6 * * 1'
+    push:
+        paths:
+            - '**/Cargo.toml'
+            - Cargo.lock
+            - deny.toml
+            - .github/workflows/audit.yml
+    workflow_dispatch:
+
+permissions:
+    contents: read
+
+jobs:
+    advisories:
+        name: Advisories
+        runs-on: ubuntu-latest
+        timeout-minutes: 10
+        steps:
+            -   uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+                with:
+                    persist-credentials: false
+            -   uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532 # v2.86.3
+                with:
+                    tool: cargo-deny
+            -   run: cargo deny check advisories

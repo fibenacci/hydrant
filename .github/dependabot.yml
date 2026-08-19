@@ -1,0 +1,32 @@
+version: 2
+updates:
+    -   package-ecosystem: cargo
+        directory: /
+        schedule:
+            interval: weekly
+            day: monday
+            time: '06:00'
+        open-pull-requests-limit: 5
+        # Conventional Commit prefixes, so release-plz classifies the PRs correctly.
+        commit-message:
+            prefix: build
+            include: scope
+        groups:
+            # One PR per ecosystem-wide bump instead of ten: patch-level noise is not
+            # worth a review each.
+            patch-updates:
+                patterns: ['*']
+                update-types: [patch]
+
+    -   package-ecosystem: github-actions
+        directory: /
+        schedule:
+            interval: weekly
+            day: monday
+            time: '06:00'
+        open-pull-requests-limit: 5
+        commit-message:
+            prefix: ci
+        groups:
+            actions:
+                patterns: ['*']

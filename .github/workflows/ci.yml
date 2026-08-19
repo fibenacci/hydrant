@@ -1,0 +1,209 @@
+name: CI
+
+on:
+    pull_request:
+    push:
+        branches: [main]
+    workflow_dispatch:
+
+# Supersede in-flight PR runs; never cancel a push to main, because the
+# release-plz job at the end must always run to completion.
+concurrency:
+    group: ci-${{ github.ref }}
+    cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Read-only by default. The two jobs that need more declare it themselves.
+permissions:
+    contents: read
+
+env:
+    CARGO_TERM_COLOR: always
+    RUST_BACKTRACE: '1'
+    # A stale Cargo.lock fails CI instead of being silently updated.
+    CARGO_LOCKED: '--locked'
+    # Minimum supported Rust version, kept in sync with rust-version in Cargo.toml.
+    MSRV: '1.85.0'
+
+# Third-party actions are pinned to a commit SHA, with the human-readable version
+# in a trailing comment: a mutable tag is a supply-chain hole in a workflow that
+# can see repository secrets. Dependabot keeps both in sync (.github/dependabot.yml).
+jobs:
+    format:
+        name: Format
+        runs-on: ubuntu-latest
+        timeout-minutes: 10
+        steps:
+            -   uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+                with:
+                    persist-credentials: false
+            -   uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+            -   run: make fmt-check
+
+    lint:
+        name: Clippy
+        runs-on: ubuntu-latest
+        timeout-minutes: 15
+        steps:
+            -   uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+                with:
+                    persist-credentials: false
+            -   uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+            -   uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+            -   run: make clippy
+
+    docs:
+        name: Rustdoc
+        runs-on: ubuntu-latest
+        timeout-minutes: 15
+        steps:
+            -   uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+                with:
+                    persist-credentials: false
+            -   uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+            -   uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+            -   run: make doc
+
+    msrv:
+        name: MSRV (${{ env.MSRV }})
+        runs-on: ubuntu-latest
+        timeout-minutes: 15
+        # rust-toolchain.toml pins stable for everyone else; this overrides it so the
+        # MSRV claim is actually tested instead of silently checked on stable.
+        env:
+            RUSTUP_TOOLCHAIN: ${{ env.MSRV }}
+        steps:
+            -   uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+                with:
+                    persist-credentials: false
+            -   uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+                with:
+                    toolchain: ${{ env.MSRV }}
+            -   uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+            -   run: make check
+
+    typos:
+        name: Typos
+        runs-on: ubuntu-latest
+        timeout-minutes: 5
+        steps:
+            -   uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+                with:
+                    persist-credentials: false
+            -   uses: crate-ci/typos@8a48f81b6c64dcfea44b3633223084c4be58ac5f # v1.49.0
+
+    # cargo-deny covers advisories, licenses, bans and sources in one pass, against
+    # the real build graph — so a crate that is never compiled is not flagged, and a
+    # dependency licence outside deny.toml fails the build.
+    deny:
+        name: Cargo Deny
+        runs-on: ubuntu-latest
+        timeout-minutes: 10
+        steps:
+            -   uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+                with:
+                    persist-credentials: false
+            -   uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532 # v2.86.3
+                with:
+                    tool: cargo-deny
+            -   run: make deny
+
+    codeql:
+        name: CodeQL
+        runs-on: ubuntu-latest
+        timeout-minutes: 20
+        permissions:
+            contents: read
+            security-events: write
+        steps:
+            -   uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+                with:
+                    persist-credentials: false
+            -   uses: github/codeql-action/init@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
+                with:
+                    languages: rust
+                    build-mode: none
+            -   uses: github/codeql-action/analyze@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
+
+    test:
+        name: Tests
+        runs-on: ubuntu-latest
+        timeout-minutes: 30
+        steps:
+            -   uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+                with:
+                    persist-credentials: false
+            -   uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+            -   uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+            -   uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532 # v2.86.3
+                with:
+                    tool: cargo-nextest
+            -   id: nextest
+                run: make test-junit
+            -   id: doctests
+                if: always()
+                run: make doctest
+            -   name: Upload JUnit report
+                if: always()
+                uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+                with:
+                    name: junit-report
+                    path: target/nextest/ci/junit.xml
+                    if-no-files-found: ignore
+            # `if: always()` above means a failing nextest step would otherwise be
+            # masked by a passing upload; aggregate both outcomes explicitly.
+            -   name: Aggregate test outcomes
+                if: always()
+                run: |
+                    .github/scripts/gate.sh "A test suite failed - see the steps above." \
+                        "nextest=${{ steps.nextest.outcome }}" \
+                        "doctests=${{ steps.doctests.outcome }}"
+
+    # The single required status check for branch protection. GATE_STRICT also fails
+    # on cancelled or skipped jobs, so a green tick can never mean "did not run".
+    ci:
+        name: CI
+        needs: [format, lint, docs, msrv, typos, deny, codeql, test]
+        if: always()
+        runs-on: ubuntu-latest
+        timeout-minutes: 5
+        steps:
+            -   uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+                with:
+                    persist-credentials: false
+            -   name: Require every job to have succeeded
+                run: |
+                    GATE_STRICT=1 .github/scripts/gate.sh \
+                        "One or more required jobs failed, were cancelled, or were skipped." \
+                        "format=${{ needs.format.result }}" \
+                        "clippy=${{ needs.lint.result }}" \
+                        "rustdoc=${{ needs.docs.result }}" \
+                        "msrv=${{ needs.msrv.result }}" \
+                        "typos=${{ needs.typos.result }}" \
+                        "cargo-deny=${{ needs.deny.result }}" \
+                        "codeql=${{ needs.codeql.result }}" \
+                        "tests=${{ needs.test.result }}"
+
+    # Opens or updates the release PR (version bump + CHANGELOG.md). Merging it
+    # pushes the v<version> tag and creates the GitHub release. Nothing goes to
+    # crates.io - see release-plz.toml.
+    release-plz:
+        name: Release PR
+        needs: [ci]
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        runs-on: ubuntu-latest
+        timeout-minutes: 15
+        permissions:
+            contents: write
+            pull-requests: write
+        steps:
+            -   uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+                with:
+                    fetch-depth: 0
+            -   uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+            -   uses: release-plz/action@2eb1d8bcb770b4c48ccfaad919734b38b51958c9 # v0.5.131
+                with:
+                    command: release-plz
+                env:
+                    # A PAT or GitHub App token lets the release PR trigger CI; with the
+                    # default token GitHub's recursion guard keeps the PR unchecked.
+                    GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN || github.token }}

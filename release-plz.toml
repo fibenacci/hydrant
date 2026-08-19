@@ -1,0 +1,31 @@
+# release-plz configuration — https://release-plz.dev/docs/config
+#
+# hydrant is deployed as a service, not consumed as a library, so nothing is
+# published to crates.io yet. release-plz bumps the version, updates the
+# changelog, pushes the `v<version>` tag and creates the GitHub release.
+#
+# Publishing `hydrant-core` (projection + JCS hashing) as a library is a
+# plausible later decision — a sender implementation in Rust would want it. That
+# flips `publish` to true and needs the crate metadata to be release-ready first.
+
+[workspace]
+publish = false
+git_tag_enable = true
+git_release_enable = true
+
+[changelog]
+# Conventional Commits (see CONTRIBUTING.md), grouped by type in the changelog.
+commit_parsers = [
+    { message = "^feat", group = "Features" },
+    { message = "^fix", group = "Bug Fixes" },
+    { message = "^perf", group = "Performance" },
+    { message = "^refactor", group = "Refactoring" },
+    { message = "^docs", group = "Documentation" },
+    { message = "^test", group = "Testing" },
+    { message = "^build", group = "Build" },
+    { message = "^ci", group = "CI" },
+    { message = "^style", group = "Styling" },
+    { message = "^chore", group = "Chores" },
+    { message = "^revert", group = "Reverts" },
+    { message = ".*", group = "Other" },
+]
