@@ -1,0 +1,49 @@
+name: Feature request
+description: Propose a change to what hydrant does
+labels: [enhancement]
+body:
+    -   type: markdown
+        attributes:
+            value: |
+                Read the invariants in CONTRIBUTING.md first. Several plausible-looking ideas —
+                per-source transforms in the service, foreign-key resolution at ingest,
+                filtering on read, cross-source queries — are deliberately rejected, and a
+                proposal that reintroduces one needs to argue against the reason, not around it.
+    -   type: textarea
+        id: problem
+        attributes:
+            label: The problem
+            description: What can't you do today? Describe the situation, not the solution.
+        validations:
+            required: true
+    -   type: textarea
+        id: proposal
+        attributes:
+            label: Proposed change
+        validations:
+            required: true
+    -   type: dropdown
+        id: invariants
+        attributes:
+            label: Does this touch an invariant?
+            options:
+                - "No — it fits inside the current design"
+                - "Yes — the service would need to know something about the source domain"
+                - "Yes — it would filter, resolve or transform on the read path"
+                - "Yes — it changes the canonical form or the hashing"
+                - "Unsure"
+        validations:
+            required: true
+    -   type: textarea
+        id: alternatives
+        attributes:
+            label: Alternatives you considered
+            description: |
+                Including the sender-side one: most source-specific needs belong in the
+                adapter that pushes the data, not in the service.
+    -   type: checkboxes
+        id: scope
+        attributes:
+            label: Scope
+            options:
+                -   label: This does not require authentication or per-consumer authorization on the read path.

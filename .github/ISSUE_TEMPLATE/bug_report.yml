@@ -1,0 +1,61 @@
+name: Bug report
+description: Something behaves differently than documented
+labels: [bug]
+body:
+    -   type: markdown
+        attributes:
+            value: |
+                Not for security issues — a field reaching a response that the schema does not
+                allow is a vulnerability, not a bug. Report those privately, see SECURITY.md.
+    -   type: dropdown
+        id: component
+        attributes:
+            label: Component
+            options:
+                - core (projection / JCS hashing)
+                - store (PostgreSQL)
+                - public read API
+                - ingest API
+                - change feed / manifest / digests
+                - schema loading
+                - CLI
+                - PHP sender SDK
+                - other / unsure
+        validations:
+            required: true
+    -   type: input
+        id: version
+        attributes:
+            label: Version
+            description: Release tag, or the commit SHA you built from.
+        validations:
+            required: true
+    -   type: textarea
+        id: what-happened
+        attributes:
+            label: What happened
+            description: Include the request and the response you got, verbatim where possible.
+        validations:
+            required: true
+    -   type: textarea
+        id: expected
+        attributes:
+            label: What you expected instead
+        validations:
+            required: true
+    -   type: textarea
+        id: reproduction
+        attributes:
+            label: Reproduction
+            description: |
+                The collection schema and the ingested payload are usually enough. Redact real
+                data — a minimal synthetic payload that still reproduces it is better anyway.
+            render: yaml
+        validations:
+            required: true
+    -   type: textarea
+        id: logs
+        attributes:
+            label: Logs / metrics
+            description: Relevant `tracing` output, and the counters if a drop or drift is involved.
+            render: shell
