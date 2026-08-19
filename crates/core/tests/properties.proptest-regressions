@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 80905c892b8a20900948265036566b463ccf9974f683197be303834adf9d566d # shrinks to entries = [("price", Null), ("price", Bool(false))]
+cc f7f88f96eb3de91da563df813d4aede00ea9d0ba4ffc2febe3df5d26a1dcf6bf # shrinks to payload = Object {"images": Object {"name": Null}}
