@@ -1,0 +1,8 @@
+# nextest profiles. The `ci` profile emits the JUnit report consumed by the
+# "Publish Test Results" job (target/nextest/ci/junit.xml).
+[profile.ci]
+# Don't fail fast in CI: report every failing test in one run.
+fail-fast = false
+
+[profile.ci.junit]
+path = "junit.xml"

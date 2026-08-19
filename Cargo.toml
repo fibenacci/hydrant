@@ -1,0 +1,33 @@
+[workspace]
+resolver = "3"
+# Crates are added here as the milestones land — see CONTRIBUTING.md.
+members = ["crates/core"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/fibenacci/hydrant"
+authors = ["Benjamin Letzel <benjamin.letzel@protonmail.com>"]
+# Minimum supported Rust version. Edition 2024 needs 1.85; the CI "Build Check
+# (MSRV)" job type-checks against exactly this version, so raising it is a
+# deliberate, documented change — not a side effect of a dependency bump.
+rust-version = "1.85"
+
+[workspace.lints.rust]
+# There is no FFI and no performance argument for it in a JSON projection engine.
+unsafe_code = "forbid"
+# CI treats warnings as errors, so this makes an undocumented public item a build
+# failure. That is the intent: the invariants live in the doc comments.
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+# A panic in the projection path is a dropped record, not a crash report. Tests may
+# still unwrap - see clippy.toml.
+unwrap_used = "warn"
+expect_used = "warn"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

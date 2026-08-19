@@ -1,0 +1,10 @@
+# Pins the toolchain contributors and CI resolve by default, so a formatting or
+# clippy difference is never an artefact of who ran it.
+#
+# This file wins over `rustup default`, which is the point — but it also wins over
+# a toolchain installed by CI. The MSRV job therefore sets RUSTUP_TOOLCHAIN
+# explicitly to override it; see .github/workflows/ci.yml.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

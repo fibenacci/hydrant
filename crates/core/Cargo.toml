@@ -1,0 +1,16 @@
+[package]
+name = "hydrant-core"
+description = "Domain types, RFC 8785 canonicalization and the projection engine for hydrant"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+# Publishing core as a library is a later decision - see release-plz.toml.
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
