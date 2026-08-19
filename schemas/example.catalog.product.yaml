@@ -1,0 +1,46 @@
+# Example collection definition.
+#
+# Fields not named here are dropped at ingest and never persisted. There is no
+# wildcard: `type: object` without an `allow` list is a schema error, not a
+# pass-through. Releasing a new field is an edit to this file — i.e. a pull
+# request with a reviewer.
+
+collection: catalog.product
+
+# JSON path to the record's stable identifier within the incoming payload.
+id: $.id
+
+fields:
+  name:
+    type: string
+    index: true
+
+  sku:
+    type: string
+    index: true
+
+  price:
+    type: number
+
+  currency:
+    type: string
+
+  attributes:
+    type: object
+    allow: [color, size, material]
+
+  images:
+    type: array
+    items:
+      type: string
+
+# Only these fields may be used as query parameters (`?filter[sku]=…`).
+# Anything not listed is rejected with 400, not silently ignored.
+filters: [sku, name]
+
+# Only these fields may be used for sorting. `seq` is always available.
+sort: [seq, name]
+
+cache:
+  # s-maxage for CDN / shared caches, in seconds.
+  shared_max_age: 300
