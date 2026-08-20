@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
 # Crates are added here as the milestones land — see CONTRIBUTING.md.
-members = ["crates/core", "crates/store"]
+members = ["crates/core", "crates/store", "crates/api", "crates/server"]
 
 [workspace.package]
 version = "0.1.0"
@@ -54,11 +54,20 @@ sqlx = { version = "0.8.6", default-features = false, features = [
     "macros",
     "migrate",
 ] }
-time = "0.3"
+time = { version = "0.3", features = ["formatting"] }
 tokio = "1"
+axum = "0.8"
+tracing = "0.1"
+tower = "0.5"
+http-body-util = "0.1"
+tower-http = "0.7"
+figment = { version = "0.10", features = ["env"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # internal
 hydrant-core = { path = "crates/core" }
+hydrant-store = { path = "crates/store" }
+hydrant-api = { path = "crates/api" }
 
 # dev
 proptest = "1"
