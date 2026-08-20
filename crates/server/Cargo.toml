@@ -18,6 +18,7 @@ workspace = true
 
 [dependencies]
 axum = { workspace = true }
+clap = { workspace = true }
 figment = { workspace = true }
 hydrant-api = { workspace = true }
 hydrant-core = { workspace = true }

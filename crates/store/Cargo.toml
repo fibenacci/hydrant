@@ -13,8 +13,12 @@ publish = false
 workspace = true
 
 [dependencies]
+getrandom = { workspace = true }
+hex = { workspace = true }
+hmac = { workspace = true }
 hydrant-core = { workspace = true }
 serde_json = { workspace = true }
+sha2.workspace = true
 sqlx = { workspace = true }
 thiserror = { workspace = true }
 time = { workspace = true }
