@@ -14,15 +14,17 @@
 
 pub mod cache;
 pub mod error;
+pub mod ingest;
 pub mod public;
 pub mod response;
 pub mod state;
 
 use axum::Router;
-use axum::routing::get;
+use axum::routing::{delete, get, post};
 use hydrant_store::Store;
 
 pub use error::ApiError;
+pub use ingest::IngestState;
 pub use response::{ChangeBody, ChangesBody, ManifestBody, PageBody, RecordBody};
 pub use state::ApiState;
 
@@ -54,6 +56,24 @@ where
         .route(
             "/v1/{source}/{collection}/{id}",
             get(public::get_record::<S>),
+        )
+        .with_state(state)
+}
+
+/// The authenticated ingest router.
+///
+/// Kept separate from the public router, with its own state: the application secret lives here and
+/// nowhere else, so no read-path handler can reach credential material even by accident.
+pub fn ingest_router<S>(state: IngestState<S>) -> Router
+where
+    S: Store + 'static,
+{
+    Router::new()
+        .route("/v1/ingest/{collection}", post(ingest::ingest::<S>))
+        .route("/v1/ingest/{collection}/digests", get(ingest::digests::<S>))
+        .route(
+            "/v1/ingest/{collection}/{id}",
+            delete(ingest::delete_record::<S>),
         )
         .with_state(state)
 }

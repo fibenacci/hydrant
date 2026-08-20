@@ -20,6 +20,11 @@ pub enum ApiError {
         /// What was wrong, in words. Safe to show: it describes the request, never the store.
         message: String,
     },
+    /// No usable ingest credential was presented.
+    ///
+    /// One variant for "no header", "malformed header" and "unknown token" alike: telling a caller
+    /// which of the three it was tells it how to get closer.
+    Unauthorized,
     /// No such collection: the name is not declared in any schema.
     ///
     /// Distinct from a missing record on purpose. "This collection does not exist" and "this record
@@ -61,7 +66,22 @@ struct ErrorDetail {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        if matches!(self, Self::Unauthorized) {
+            return (
+                StatusCode::UNAUTHORIZED,
+                [crate::ingest::challenge()],
+                Json(ErrorBody {
+                    error: ErrorDetail {
+                        code: "unauthorized",
+                        message: "a valid ingest credential is required".to_owned(),
+                    },
+                }),
+            )
+                .into_response();
+        }
+
         let (status, code, message) = match self {
+            Self::Unauthorized => unreachable!("handled above"),
             Self::BadRequest { code, message } => (StatusCode::BAD_REQUEST, code, message),
             Self::UnknownCollection => (
                 StatusCode::NOT_FOUND,
