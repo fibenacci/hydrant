@@ -50,6 +50,17 @@ pub enum HashParseError {
 pub struct ContentHash([u8; HASH_LEN]);
 
 impl ContentHash {
+    /// The hash of the empty document, which is the payload a tombstone carries.
+    ///
+    /// Pinned as a constant rather than computed, so recording a deletion needs no fallible
+    /// call. The test below asserts it against [`content_hash`], which is what makes the
+    /// constant safe to trust.
+    pub const EMPTY_DOCUMENT: Self = Self([
+        0x44, 0x13, 0x6f, 0xa3, 0x55, 0xb3, 0x67, 0x8a, 0x11, 0x46, 0xad, 0x16, 0xf7, 0xe8, 0x64,
+        0x9e, 0x94, 0xfb, 0x4f, 0xc2, 0x1f, 0xe7, 0x7e, 0x83, 0x10, 0xc0, 0x60, 0xf6, 0x1c, 0xaa,
+        0xff, 0x8a,
+    ]);
+
     /// Wraps raw digest bytes.
     #[must_use]
     pub const fn from_bytes(bytes: [u8; HASH_LEN]) -> Self {
@@ -190,6 +201,14 @@ mod tests {
         assert_eq!(
             hash.to_hex(),
             "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+        );
+    }
+
+    #[test]
+    fn the_pinned_empty_document_constant_matches_the_computed_hash() {
+        assert_eq!(
+            content_hash(&json!({})).expect("hash"),
+            ContentHash::EMPTY_DOCUMENT
         );
     }
 
