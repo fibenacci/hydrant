@@ -147,6 +147,21 @@ The version is pinned deliberately: a newer `sqlx-cli` writes metadata the pinne
 cannot read. `sqlx` itself is held at 0.8 because 0.9 requires Rust 1.94, well beyond the 1.88 MSRV
 declared in `Cargo.toml`.
 
+## Rate limits
+
+Two budgets, both per client: one for ordinary reads and a lower one for the change feed. Keying is
+on the peer address unless `HYDRANT_TRUST_FORWARDED_FOR` is set, and that default is the safe one —
+a forwarded header is whatever the client says it is unless something in front overwrites it, and
+trusting it wrongly hands every client a fresh budget per request.
+
+Two routes are deliberately outside: `/health`, because an orchestrator probes it constantly and
+throttling liveness is how a healthy service gets restarted, and the ingest surface, because it is
+authenticated and a per-address limit would throttle a legitimate sender while doing nothing about a
+credential that should simply be revoked.
+
+A refusal answers 429 in the same JSON envelope as every other error, with `Retry-After` of at least
+one second.
+
 ## Metrics
 
 The Prometheus exporter listens on `HYDRANT_METRICS_LISTEN`, separate from the data surface. Adding a

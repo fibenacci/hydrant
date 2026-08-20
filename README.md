@@ -67,8 +67,13 @@ http_requests_total{method,route,status}
 http_request_duration_seconds{method,route}
 ```
 
-Not there yet: sorting by a payload field, rate limits, the generated OpenAPI document, and the
-CLI.
+Public reads are rate limited per client, with a lower budget for the change feed than for
+ordinary reads — a feed page can be a thousand records and cannot be answered from a cache
+validator alone. Liveness is never limited, and the authenticated ingest surface is not limited by
+IP at all: throttling a known sender by address is the wrong knob.
+
+Not there yet: sorting by a payload field, a response size cap, the generated OpenAPI document,
+and the CLI.
 
 What the service guarantees is in [CONTRIBUTING.md](CONTRIBUTING.md#invariants); how it is
 built is in the [Makefile](Makefile).
