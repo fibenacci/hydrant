@@ -9,10 +9,12 @@ use std::time::Duration;
 use axum::Router;
 use axum::http::header::{ETAG, IF_NONE_MATCH};
 use axum::http::{Method, StatusCode};
+use axum::middleware;
 use clap::{Parser, Subcommand};
-use hydrant_api::{ApiState, IngestState, ingest_router, router};
+use hydrant_api::{ApiState, IngestState, ingest_router, metrics, router};
 use hydrant_core::{SchemaSet, SourceName};
 use hydrant_store::{PostgresStore, Store, Token};
+use metrics_exporter_prometheus::PrometheusBuilder;
 use tokio::net::TcpListener;
 use tokio::signal;
 use tower_http::compression::CompressionLayer;
@@ -83,6 +85,9 @@ async fn serve(config: Config) -> Result<(), Box<dyn Error>> {
     let schemas = schemas::load(&config.schemas_dir)?;
     tracing::info!(collections = schemas.len(), "collection definitions loaded");
 
+    install_metrics(config.metrics_listen)?;
+    tracing::info!(address = %config.metrics_listen, "exporting metrics");
+
     let store = PostgresStore::connect(
         &config.database_url,
         config.max_connections,
@@ -134,6 +139,21 @@ async fn mint(config: &Config, source: &str, label: &str) -> Result<(), Box<dyn 
     Ok(())
 }
 
+/// Installs the Prometheus exporter on its own listener.
+///
+/// The buckets are explicit because the defaults are not shaped like this service: a cached read is
+/// sub-millisecond and a manifest over a large collection is not, so the range has to cover both
+/// without spending resolution where nothing happens.
+fn install_metrics(address: std::net::SocketAddr) -> Result<(), Box<dyn Error>> {
+    PrometheusBuilder::new()
+        .with_http_listener(address)
+        .set_buckets(&[
+            0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0,
+        ])?
+        .install()?;
+    Ok(())
+}
+
 /// The router with the layers a public endpoint needs.
 fn service(store: PostgresStore, schemas: SchemaSet, config: &Config) -> Router {
     // CORS is wide open on purpose: the data is public, and a browser consumer is as legitimate as
@@ -156,6 +176,9 @@ fn service(store: PostgresStore, schemas: SchemaSet, config: &Config) -> Router 
 
     public
         .merge(ingest)
+        // Outermost, so it sees the status a caller actually gets - including the one the timeout
+        // layer below produces.
+        .layer(middleware::from_fn(metrics::track))
         // 503 rather than the default 408: the client was not slow, the service gave up. A CDN
         // reads that as retriable, which is what it is.
         .layer(TimeoutLayer::with_status_code(

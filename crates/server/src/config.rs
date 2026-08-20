@@ -25,6 +25,11 @@ pub struct Config {
     pub listen: SocketAddr,
     /// Upper bound on pooled database connections.
     pub max_connections: u32,
+    /// Address the Prometheus exporter listens on.
+    ///
+    /// A separate listener, not a route on the public router: metrics describe the deployment, and
+    /// nothing about them belongs on a surface that sits behind a CDN.
+    pub metrics_listen: SocketAddr,
     /// Directory of collection definitions, read at startup.
     ///
     /// Cache directives are per collection and come from these files, which is why there is no
@@ -54,6 +59,7 @@ impl Default for Config {
             token_secret: String::new(),
             listen: SocketAddr::from(([0, 0, 0, 0], 8080)),
             max_connections: 10,
+            metrics_listen: SocketAddr::from(([127, 0, 0, 1], 9090)),
             schemas_dir: PathBuf::from("schemas"),
             migrate_on_start: true,
             request_timeout: 10,
