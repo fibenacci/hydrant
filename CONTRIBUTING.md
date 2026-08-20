@@ -86,8 +86,17 @@ For Podman or any other runtime, override the compose command rather than editin
 make db-up COMPOSE="podman compose"
 ```
 
-The service itself is not runnable yet — the binary arrives with `crates/server`. Until then
-`make db-up` is the whole local environment.
+Then start the service:
+
+```bash
+make run          # applies migrations, serves on 127.0.0.1:8080 by default
+curl -s localhost:8080/health
+curl -si localhost:8080/v1/sap-stage/catalog.product | head -20
+```
+
+There is no ingest endpoint yet, so a fresh store serves empty collections. Every setting comes
+from the environment — see `.env.example`; there is no config file, because a file would be a
+second place to look when a setting is wrong.
 
 ## Database and query metadata
 

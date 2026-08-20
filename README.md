@@ -32,11 +32,22 @@ Consequences, all deliberate:
 
 ## Status
 
-Early implementation. `crates/core` carries the parts the whole design rests on — RFC 8785
-canonicalisation, content hashing, and the projection engine that drops everything a
-collection schema does not name. `crates/store` persists records in PostgreSQL, idempotently
-over the content hash, with deletes as tombstones. There is no HTTP surface yet, so nothing is
-servable.
+Early implementation, and it serves:
+
+```bash
+make db-up && make run
+curl -si localhost:8080/v1/sap-stage/catalog.product/SW1
+```
+
+- `crates/core` — RFC 8785 canonicalisation, content hashing, and the projection engine that
+  drops everything a collection schema does not name.
+- `crates/store` — records in PostgreSQL, idempotent over the content hash, deletes as
+  tombstones, cursor pagination on the change-feed position.
+- `crates/api` + `crates/server` — the public read API: collection listings, single records,
+  `ETag` and `If-None-Match`, `Cache-Control` on everything cacheable.
+
+Not there yet: the ingest endpoint, the change feed, manifests and digests, declared filters,
+schema loading from YAML, and the generated OpenAPI document.
 
 What the service guarantees is in [CONTRIBUTING.md](CONTRIBUTING.md#invariants); how it is
 built is in the [Makefile](Makefile).
