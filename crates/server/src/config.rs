@@ -25,6 +25,19 @@ pub struct Config {
     pub listen: SocketAddr,
     /// Upper bound on pooled database connections.
     pub max_connections: u32,
+    /// The largest canonical payload a single record may carry, in bytes.
+    ///
+    /// Measured after projection, so padding a record with fields the schema does not release does
+    /// not count against it. This is what makes a response size bound possible at all: without a
+    /// per-record limit, a page of any length can be arbitrarily large.
+    pub max_payload_bytes: usize,
+    /// The largest ingest request body, in bytes.
+    pub max_body_bytes: usize,
+    /// The largest amount of payload one page returns, in bytes.
+    ///
+    /// A page that runs out of budget ends early and offers a cursor, so a large collection stays
+    /// walkable and no record becomes unreachable.
+    pub max_response_bytes: usize,
     /// Sustained read rate per client, per second.
     pub read_per_second: u32,
     /// How many read requests a client may make at once.
@@ -75,6 +88,9 @@ impl Default for Config {
             token_secret: String::new(),
             listen: SocketAddr::from(([0, 0, 0, 0], 8080)),
             max_connections: 10,
+            max_payload_bytes: 64 * 1024,
+            max_body_bytes: 4 * 1024 * 1024,
+            max_response_bytes: 1024 * 1024,
             read_per_second: 20,
             read_burst: 60,
             feed_per_second: 2,
