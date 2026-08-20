@@ -20,8 +20,8 @@ pub mod token;
 pub use error::StoreError;
 pub use postgres::PostgresStore;
 pub use record::{
-    Applied, Deletion, Digest, DigestPage, IngestOp, Manifest, Page, PageLimit, StoredRecord,
-    Upsert,
+    Applied, ByteBudget, Deletion, Digest, DigestPage, IngestOp, Manifest, Page, PageBudget,
+    PageLimit, StoredRecord, Upsert,
 };
 pub use store::Store;
 pub use token::{Token, TokenHash};

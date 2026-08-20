@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            SELECT id, seq, payload, content_hash, ingested_at, deleted_at\n              FROM record\n             WHERE source = $1\n               AND collection = $2\n               AND seq > $3\n             ORDER BY seq\n             LIMIT $4\n            ",
+  "query": "\n            SELECT id,\n                   seq,\n                   payload,\n                   octet_length(payload::text) AS \"payload_bytes!\",\n                   content_hash,\n                   ingested_at,\n                   deleted_at\n              FROM record\n             WHERE source = $1\n               AND collection = $2\n               AND deleted_at IS NULL\n               AND seq > $3\n               AND payload @> $5\n             ORDER BY seq\n             LIMIT $4\n            ",
   "describe": {
     "columns": [
       {
@@ -20,16 +20,21 @@
       },
       {
         "ordinal": 3,
+        "name": "payload_bytes!",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 4,
         "name": "content_hash",
         "type_info": "Bytea"
       },
       {
-        "ordinal": 4,
+        "ordinal": 5,
         "name": "ingested_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 5,
+        "ordinal": 6,
         "name": "deleted_at",
         "type_info": "Timestamptz"
       }
@@ -39,17 +44,19 @@
         "Text",
         "Text",
         "Int8",
-        "Int8"
+        "Int8",
+        "Jsonb"
       ]
     },
     "nullable": [
       false,
       false,
       false,
+      null,
       false,
       false,
       true
     ]
   },
-  "hash": "3c4835dc2752aedee968c0b34ad77e79df86032cafe1abc831f795eb3bc7aa1d"
+  "hash": "a0bd1fa1d6511a9cf046799ee8799fb54caa5e02f74cda17d317c5b6ae0d5864"
 }

@@ -13,8 +13,8 @@ use time::OffsetDateTime;
 
 use crate::error::StoreError;
 use crate::record::{
-    Applied, Deletion, Digest, DigestPage, IngestOp, Manifest, Page, PageLimit, StoredRecord,
-    Upsert,
+    Applied, Deletion, Digest, DigestPage, IngestOp, Manifest, Page, PageBudget, PageLimit,
+    StoredRecord, Upsert,
 };
 use crate::store::Store;
 use crate::token::TokenHash;
@@ -159,12 +159,18 @@ impl Store for PostgresStore {
         collection: &CollectionName,
         filter: &Filter,
         after: Option<Seq>,
-        limit: PageLimit,
+        budget: PageBudget,
     ) -> Result<Page, StoreError> {
         let rows = sqlx::query_as!(
             RawRecord,
             r#"
-            SELECT id, seq, payload, content_hash, ingested_at, deleted_at
+            SELECT id,
+                   seq,
+                   payload,
+                   octet_length(payload::text) AS "payload_bytes!",
+                   content_hash,
+                   ingested_at,
+                   deleted_at
               FROM record
              WHERE source = $1
                AND collection = $2
@@ -177,13 +183,13 @@ impl Store for PostgresStore {
             source.as_str(),
             collection.as_str(),
             cursor(after)?,
-            i64::from(limit.get()),
+            i64::from(budget.records.get()),
             filter.as_json(),
         )
         .fetch_all(&self.pool)
         .await?;
 
-        page(rows, source, collection, limit)
+        page(rows, source, collection, budget)
     }
 
     async fn changes(
@@ -191,14 +197,20 @@ impl Store for PostgresStore {
         source: &SourceName,
         collection: &CollectionName,
         since: Option<Seq>,
-        limit: PageLimit,
+        budget: PageBudget,
     ) -> Result<Page, StoreError> {
         // The one difference from `list`: no `deleted_at IS NULL`. A consumer replicating from a
         // cursor has to see the tombstone, or it keeps serving a record that was deleted.
         let rows = sqlx::query_as!(
             RawRecord,
             r#"
-            SELECT id, seq, payload, content_hash, ingested_at, deleted_at
+            SELECT id,
+                   seq,
+                   payload,
+                   octet_length(payload::text) AS "payload_bytes!",
+                   content_hash,
+                   ingested_at,
+                   deleted_at
               FROM record
              WHERE source = $1
                AND collection = $2
@@ -209,12 +221,12 @@ impl Store for PostgresStore {
             source.as_str(),
             collection.as_str(),
             cursor(since)?,
-            i64::from(limit.get()),
+            i64::from(budget.records.get()),
         )
         .fetch_all(&self.pool)
         .await?;
 
-        page(rows, source, collection, limit)
+        page(rows, source, collection, budget)
     }
 
     async fn manifest(
@@ -480,6 +492,9 @@ struct RawRecord {
     id: String,
     seq: i64,
     payload: Value,
+    /// Size of the payload as JSON text, so a page can be bounded in bytes without serialising
+    /// every record twice to find out how big it is.
+    payload_bytes: i32,
     content_hash: Vec<u8>,
     ingested_at: OffsetDateTime,
     deleted_at: Option<OffsetDateTime>,
@@ -505,22 +520,34 @@ impl RawRecord {
     }
 }
 
-/// Turns rows into a page.
+/// Turns rows into a page, spending the byte budget as it goes.
 ///
-/// Only a full page promises there may be more. A short page ends the walk, which is what lets a
-/// consumer stop without a second request.
+/// A cursor is offered when the record count was reached or the budget cut the page short. The first
+/// record is always included, even if it alone exceeds the budget: a payload larger than a whole
+/// page has to remain reachable, or a consumer walking the feed would ask for the same cursor
+/// forever and never get past it.
 fn page(
     rows: Vec<RawRecord>,
     source: &SourceName,
     collection: &CollectionName,
-    limit: PageLimit,
+    budget: PageBudget,
 ) -> Result<Page, StoreError> {
-    let full_page = rows.len() == usize::from(limit.get());
-    let records = rows
-        .into_iter()
-        .map(|row| row.into_record(source, collection))
-        .collect::<Result<Vec<_>, _>>()?;
-    let next = if full_page {
+    let count_reached = rows.len() == usize::from(budget.records.get());
+    let mut records = Vec::with_capacity(rows.len());
+    let mut spent = 0_usize;
+    let mut cut_short = false;
+
+    for row in rows {
+        let size = usize::try_from(row.payload_bytes).unwrap_or(0);
+        if !records.is_empty() && spent.saturating_add(size) > budget.bytes.get() {
+            cut_short = true;
+            break;
+        }
+        spent = spent.saturating_add(size);
+        records.push(row.into_record(source, collection)?);
+    }
+
+    let next = if cut_short || count_reached {
         records.last().map(|record| record.seq)
     } else {
         None

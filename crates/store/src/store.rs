@@ -7,7 +7,8 @@ use crate::error::StoreError;
 use hydrant_core::Seq;
 
 use crate::record::{
-    Applied, Deletion, DigestPage, IngestOp, Manifest, Page, PageLimit, StoredRecord, Upsert,
+    Applied, Deletion, DigestPage, IngestOp, Manifest, Page, PageBudget, PageLimit, StoredRecord,
+    Upsert,
 };
 use crate::token::TokenHash;
 
@@ -97,6 +98,10 @@ pub trait Store: Send + Sync {
     /// everything and needs no special case. It has already been validated against the collection's
     /// schema — the store does not decide what may be filtered on.
     ///
+    /// The page ends at whichever part of `budget` runs out first. A page cut short by the byte
+    /// budget still offers a cursor, so from the caller's side it is indistinguishable from a page
+    /// that hit the record count.
+    ///
     /// # Errors
     ///
     /// Returns [`StoreError`] if the database rejects the query or a row cannot be read back as a
@@ -107,7 +112,7 @@ pub trait Store: Send + Sync {
         collection: &CollectionName,
         filter: &Filter,
         after: Option<Seq>,
-        limit: PageLimit,
+        budget: PageBudget,
     ) -> impl Future<Output = Result<Page, StoreError>> + Send;
 
     /// One page of the change feed: every change after `since`, tombstones included.
@@ -129,7 +134,7 @@ pub trait Store: Send + Sync {
         source: &SourceName,
         collection: &CollectionName,
         since: Option<Seq>,
-        limit: PageLimit,
+        budget: PageBudget,
     ) -> impl Future<Output = Result<Page, StoreError>> + Send;
 
     /// The collection's count, checksum and feed position.

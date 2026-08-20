@@ -131,15 +131,77 @@ impl Default for PageLimit {
     }
 }
 
+/// How many bytes of payload a page may carry.
+///
+/// The record count alone does not bound a response: a thousand records of sixty kilobytes each is
+/// sixty megabytes. This bounds the answer in the unit that actually costs something to produce, to
+/// transfer and to cache.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ByteBudget(usize);
+
+impl ByteBudget {
+    /// The largest budget a request can ask for.
+    pub const MAX: usize = 4 * 1024 * 1024;
+
+    /// The budget used when a request does not ask for one.
+    pub const DEFAULT: usize = 1024 * 1024;
+
+    /// Clamps `requested` into `1..=MAX`.
+    #[must_use]
+    pub const fn clamp(requested: usize) -> Self {
+        if requested == 0 {
+            Self(1)
+        } else if requested > Self::MAX {
+            Self(Self::MAX)
+        } else {
+            Self(requested)
+        }
+    }
+
+    /// The clamped budget.
+    #[must_use]
+    pub const fn get(self) -> usize {
+        self.0
+    }
+}
+
+impl Default for ByteBudget {
+    fn default() -> Self {
+        Self(Self::DEFAULT)
+    }
+}
+
+/// What a page may cost: a record count and a payload budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PageBudget {
+    /// The most records to return.
+    pub records: PageLimit,
+    /// The most payload bytes to return.
+    pub bytes: ByteBudget,
+}
+
+impl PageBudget {
+    /// A budget of `records` and the default byte allowance.
+    #[must_use]
+    pub const fn of(records: PageLimit) -> Self {
+        Self {
+            records,
+            bytes: ByteBudget(ByteBudget::DEFAULT),
+        }
+    }
+}
+
 /// One page of a listing or of the change feed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Page {
     /// The records in feed order.
     pub records: Vec<StoredRecord>,
-    /// The cursor to pass as `after` for the next page, or `None` when the page was not full.
+    /// The cursor to pass as `after` for the next page, or `None` when the walk is complete.
     ///
     /// Pagination is cursor-based on `seq`, never offset-based: an offset over a table that is
-    /// being written to produces duplicates and gaps.
+    /// being written to produces duplicates and gaps. A cursor is offered when the record count was
+    /// reached *or* the byte budget cut the page short — from the caller's side the two are the same
+    /// thing, which is why it is one field.
     pub next: Option<Seq>,
 }
 

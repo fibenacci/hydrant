@@ -12,7 +12,8 @@ use hydrant_core::{
     CollectionName, ContentHash, Filter, RecordId, RecordKey, SourceName, collection_checksum,
 };
 use hydrant_store::{
-    Applied, Deletion, IngestOp, PageLimit, PostgresStore, Store, StoreError, Token, Upsert,
+    Applied, ByteBudget, Deletion, IngestOp, PageBudget, PageLimit, PostgresStore, Store,
+    StoreError, Token, Upsert,
 };
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -361,7 +362,7 @@ async fn a_listing_walks_the_collection_in_feed_order(pool: PgPool) -> Result<()
             &collection("catalog.product"),
             &Filter::default(),
             None,
-            PageLimit::clamp(2),
+            PageBudget::of(PageLimit::clamp(2)),
         )
         .await?;
     assert_eq!(first.records.len(), 2);
@@ -375,7 +376,7 @@ async fn a_listing_walks_the_collection_in_feed_order(pool: PgPool) -> Result<()
             &collection("catalog.product"),
             &Filter::default(),
             Some(cursor),
-            PageLimit::clamp(2),
+            PageBudget::of(PageLimit::clamp(2)),
         )
         .await?;
     assert_eq!(second.records.len(), 1);
@@ -397,7 +398,7 @@ async fn a_listing_does_not_serve_tombstones(pool: PgPool) -> Result<(), StoreEr
             &collection("catalog.product"),
             &Filter::default(),
             None,
-            PageLimit::default(),
+            PageBudget::default(),
         )
         .await?;
     let ids: Vec<&str> = page
@@ -418,7 +419,7 @@ async fn an_unknown_collection_lists_empty(pool: PgPool) -> Result<(), StoreErro
             &collection("catalog.nothing"),
             &Filter::default(),
             None,
-            PageLimit::default(),
+            PageBudget::default(),
         )
         .await?;
     assert!(page.records.is_empty());
@@ -465,7 +466,7 @@ async fn the_change_feed_carries_tombstones(pool: PgPool) -> Result<(), StoreErr
             &source(),
             &collection("catalog.product"),
             None,
-            PageLimit::default(),
+            PageBudget::default(),
         )
         .await?;
 
@@ -501,7 +502,7 @@ async fn the_change_feed_resumes_after_a_cursor(pool: PgPool) -> Result<(), Stor
             &source(),
             &collection("catalog.product"),
             Some(first),
-            PageLimit::default(),
+            PageBudget::default(),
         )
         .await?;
     let ids: Vec<&str> = feed
@@ -526,7 +527,7 @@ async fn an_unchanged_upsert_produces_no_feed_entry(pool: PgPool) -> Result<(), 
             &source(),
             &collection("catalog.product"),
             None,
-            PageLimit::default(),
+            PageBudget::default(),
         )
         .await?;
     assert_eq!(feed.records.len(), 1, "three pushes, one change");
@@ -779,7 +780,7 @@ async fn a_filter_narrows_a_listing(pool: PgPool) -> Result<(), StoreError> {
             &collection("catalog.product"),
             &filter(&[("colour", "red")]),
             None,
-            PageLimit::default(),
+            PageBudget::default(),
         )
         .await?;
 
@@ -808,7 +809,7 @@ async fn filters_compose(pool: PgPool) -> Result<(), StoreError> {
             &collection("catalog.product"),
             &filter(&[("colour", "red"), ("sku", "SW-2")]),
             None,
-            PageLimit::default(),
+            PageBudget::default(),
         )
         .await?;
 
@@ -835,7 +836,7 @@ async fn a_filter_never_reaches_a_tombstone(pool: PgPool) -> Result<(), StoreErr
             &collection("catalog.product"),
             &filter(&[("colour", "red")]),
             None,
-            PageLimit::default(),
+            PageBudget::default(),
         )
         .await?;
     assert!(page.records.is_empty());
@@ -858,7 +859,7 @@ async fn a_filter_composes_with_the_cursor(pool: PgPool) -> Result<(), StoreErro
             &collection("catalog.product"),
             &red,
             None,
-            PageLimit::clamp(2),
+            PageBudget::of(PageLimit::clamp(2)),
         )
         .await?;
     assert_eq!(first.records.len(), 2);
@@ -870,7 +871,7 @@ async fn a_filter_composes_with_the_cursor(pool: PgPool) -> Result<(), StoreErro
             &collection("catalog.product"),
             &red,
             Some(cursor),
-            PageLimit::clamp(2),
+            PageBudget::of(PageLimit::clamp(2)),
         )
         .await?;
     let ids: Vec<&str> = second
@@ -903,7 +904,7 @@ async fn a_filter_matches_by_structure_not_by_value_anywhere(
             &collection("catalog.product"),
             &filter(&[("colour", "red")]),
             None,
-            PageLimit::default(),
+            PageBudget::default(),
         )
         .await?;
     assert!(page.records.is_empty());
@@ -935,4 +936,150 @@ async fn a_statement_that_runs_too_long_is_cut_off(
         Some("57014"),
         "unexpected error: {error}"
     );
+}
+
+#[sqlx::test]
+async fn a_page_is_cut_short_by_the_byte_budget(pool: PgPool) -> Result<(), StoreError> {
+    let store = PostgresStore::from_pool(pool);
+    // Three records of roughly a kilobyte each.
+    for id in ["SW1", "SW2", "SW3"] {
+        store
+            .upsert(&key(id), &json!({ "sku": "x".repeat(1000) }))
+            .await?;
+    }
+
+    let budget = PageBudget {
+        records: PageLimit::default(),
+        bytes: ByteBudget::clamp(1500),
+    };
+    let page = store
+        .list(
+            &source(),
+            &collection("catalog.product"),
+            &Filter::default(),
+            None,
+            budget,
+        )
+        .await?;
+
+    assert_eq!(page.records.len(), 1, "the second record would not fit");
+    assert!(
+        page.next.is_some(),
+        "a page cut short still offers a cursor"
+    );
+    Ok(())
+}
+
+#[sqlx::test]
+async fn a_cursor_from_a_cut_short_page_continues_the_walk(pool: PgPool) -> Result<(), StoreError> {
+    let store = PostgresStore::from_pool(pool);
+    for id in ["SW1", "SW2", "SW3"] {
+        store
+            .upsert(&key(id), &json!({ "sku": "x".repeat(1000) }))
+            .await?;
+    }
+    let budget = PageBudget {
+        records: PageLimit::default(),
+        bytes: ByteBudget::clamp(1500),
+    };
+
+    let mut seen = Vec::new();
+    let mut cursor = None;
+    for _ in 0..5 {
+        let page = store
+            .list(
+                &source(),
+                &collection("catalog.product"),
+                &Filter::default(),
+                cursor,
+                budget,
+            )
+            .await?;
+        seen.extend(page.records.iter().map(|record| record.key.id.to_string()));
+        match page.next {
+            Some(next) => cursor = Some(next),
+            None => break,
+        }
+    }
+
+    assert_eq!(
+        seen,
+        ["SW1", "SW2", "SW3"],
+        "every record is reached, one page at a time"
+    );
+    Ok(())
+}
+
+#[sqlx::test]
+async fn a_payload_larger_than_the_whole_budget_is_still_delivered(
+    pool: PgPool,
+) -> Result<(), StoreError> {
+    // Otherwise a consumer walking the feed would ask for the same cursor forever and never get
+    // past the record - the budget would turn one large payload into a permanent stall.
+    let store = PostgresStore::from_pool(pool);
+    store
+        .upsert(&key("SW1"), &json!({ "sku": "x".repeat(5000) }))
+        .await?;
+    store
+        .upsert(&key("SW2"), &json!({ "sku": "small" }))
+        .await?;
+
+    let budget = PageBudget {
+        records: PageLimit::default(),
+        bytes: ByteBudget::clamp(100),
+    };
+    let page = store
+        .list(
+            &source(),
+            &collection("catalog.product"),
+            &Filter::default(),
+            None,
+            budget,
+        )
+        .await?;
+
+    assert_eq!(page.records.len(), 1);
+    assert_eq!(page.records[0].key.id.as_str(), "SW1");
+    let cursor = page.next.expect("the walk continues");
+
+    let next = store
+        .list(
+            &source(),
+            &collection("catalog.product"),
+            &Filter::default(),
+            Some(cursor),
+            budget,
+        )
+        .await?;
+    assert_eq!(
+        next.records[0].key.id.as_str(),
+        "SW2",
+        "and it does get past it"
+    );
+    Ok(())
+}
+
+#[sqlx::test]
+async fn the_change_feed_is_bounded_the_same_way(pool: PgPool) -> Result<(), StoreError> {
+    let store = PostgresStore::from_pool(pool);
+    for id in ["SW1", "SW2"] {
+        store
+            .upsert(&key(id), &json!({ "sku": "x".repeat(1000) }))
+            .await?;
+    }
+
+    let page = store
+        .changes(
+            &source(),
+            &collection("catalog.product"),
+            None,
+            PageBudget {
+                records: PageLimit::default(),
+                bytes: ByteBudget::clamp(1200),
+            },
+        )
+        .await?;
+    assert_eq!(page.records.len(), 1);
+    assert!(page.next.is_some());
+    Ok(())
 }
