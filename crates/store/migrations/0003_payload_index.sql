@@ -1,0 +1,18 @@
+-- One index serves every declared equality filter.
+--
+-- `jsonb_path_ops` indexes paths rather than keys, which makes it smaller and faster than the
+-- default for the containment queries filters are built from - at the cost of not supporting key
+-- existence checks, which this service does not offer.
+--
+-- Known limit, measured rather than assumed: for a filter the planner considers unselective,
+-- Postgres prefers to walk the feed in `seq` order and discard non-matching rows - on 20k rows that
+-- was 502 buffers against 154 for a selective filter through this index. Both are bounded by the
+-- statement timeout and the page cap.
+--
+-- The better structure for that case is a b-tree index per filterable field over
+-- (expression, seq), which serves the filter and the ordering together. It cannot be used while the
+-- query filters by containment, because Postgres does not rewrite `payload @> '{"sku":"X"}'` into
+-- `payload->>'sku' = 'X'`. Adopting it therefore means building the WHERE clause per request, which
+-- costs the compile-time checking every other query in this codebase has. That trade is written
+-- down as an open decision rather than made in passing.
+CREATE INDEX record_payload_gin ON record USING gin (payload jsonb_path_ops);

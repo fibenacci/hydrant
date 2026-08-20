@@ -1,6 +1,6 @@
 //! The storage contract.
 
-use hydrant_core::{CollectionName, RecordId, RecordKey, SourceName};
+use hydrant_core::{CollectionName, Filter, RecordId, RecordKey, SourceName};
 use serde_json::Value;
 
 use crate::error::StoreError;
@@ -88,10 +88,14 @@ pub trait Store: Send + Sync {
         label: &str,
     ) -> impl Future<Output = Result<(), StoreError>> + Send;
 
-    /// Reads one page of a collection in feed order, tombstones excluded.
+    /// Reads one page of a collection in feed order, tombstones excluded, narrowed by `filter`.
     ///
     /// Tombstones are left out because a listing serves what is public now; a consumer that needs
     /// to observe deletions replicates the change feed instead.
+    ///
+    /// The filter is applied by containment on the stored payload, so an empty filter matches
+    /// everything and needs no special case. It has already been validated against the collection's
+    /// schema — the store does not decide what may be filtered on.
     ///
     /// # Errors
     ///
@@ -101,6 +105,7 @@ pub trait Store: Send + Sync {
         &self,
         source: &SourceName,
         collection: &CollectionName,
+        filter: &Filter,
         after: Option<Seq>,
         limit: PageLimit,
     ) -> impl Future<Output = Result<Page, StoreError>> + Send;
@@ -110,6 +115,10 @@ pub trait Store: Send + Sync {
     /// This is the difference from [`Store::list`], and it is the point of keeping tombstones at
     /// all. A consumer replicating from a cursor has to observe a deletion; a removed row would
     /// simply stop appearing and the consumer would keep serving what it last saw.
+    ///
+    /// The feed takes no filter, deliberately. A record that stops matching a filter would leave a
+    /// filtered feed with no entry at all, so a consumer replicating it would keep serving a record
+    /// that no longer belongs to its view — the exact failure tombstones exist to prevent.
     ///
     /// # Errors
     ///

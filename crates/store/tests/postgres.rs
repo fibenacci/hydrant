@@ -7,14 +7,17 @@
 // denies both lints.
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
+use hydrant_core::schema::CollectionSchema;
 use hydrant_core::{
-    CollectionName, ContentHash, RecordId, RecordKey, SourceName, collection_checksum,
+    CollectionName, ContentHash, Filter, RecordId, RecordKey, SourceName, collection_checksum,
 };
 use hydrant_store::{
     Applied, Deletion, IngestOp, PageLimit, PostgresStore, Store, StoreError, Token, Upsert,
 };
 use serde_json::{Value, json};
 use sqlx::PgPool;
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+use std::time::Duration;
 
 fn source() -> SourceName {
     SourceName::new("sap-stage").expect("valid source")
@@ -30,6 +33,26 @@ fn key(id: &str) -> RecordKey {
         collection("catalog.product"),
         RecordId::new(id).expect("valid id"),
     )
+}
+
+/// A schema that declares two filterable fields, so filters can be built the way the API builds
+/// them: through validation, never by hand.
+fn schema() -> CollectionSchema {
+    serde_json::from_value(json!({
+        "collection": "catalog.product",
+        "id": "$.id",
+        "fields": {
+            "sku": { "type": "string", "index": true },
+            "colour": { "type": "string", "index": true },
+            "price": { "type": "number" }
+        },
+        "filters": ["sku", "colour"]
+    }))
+    .expect("valid schema")
+}
+
+fn filter(pairs: &[(&str, &str)]) -> Filter {
+    Filter::parse(&schema(), pairs.iter().copied()).expect("valid filter")
 }
 
 fn upsert(id: &str, payload: Value) -> IngestOp {
@@ -336,6 +359,7 @@ async fn a_listing_walks_the_collection_in_feed_order(pool: PgPool) -> Result<()
         .list(
             &source(),
             &collection("catalog.product"),
+            &Filter::default(),
             None,
             PageLimit::clamp(2),
         )
@@ -349,6 +373,7 @@ async fn a_listing_walks_the_collection_in_feed_order(pool: PgPool) -> Result<()
         .list(
             &source(),
             &collection("catalog.product"),
+            &Filter::default(),
             Some(cursor),
             PageLimit::clamp(2),
         )
@@ -370,6 +395,7 @@ async fn a_listing_does_not_serve_tombstones(pool: PgPool) -> Result<(), StoreEr
         .list(
             &source(),
             &collection("catalog.product"),
+            &Filter::default(),
             None,
             PageLimit::default(),
         )
@@ -390,6 +416,7 @@ async fn an_unknown_collection_lists_empty(pool: PgPool) -> Result<(), StoreErro
         .list(
             &source(),
             &collection("catalog.nothing"),
+            &Filter::default(),
             None,
             PageLimit::default(),
         )
@@ -731,4 +758,181 @@ async fn a_token_cannot_be_recorded_twice(pool: PgPool) -> Result<(), StoreError
     let again = store.store_token(&hash, &source(), "second").await;
     assert!(matches!(again, Err(StoreError::Database(_))));
     Ok(())
+}
+
+#[sqlx::test]
+async fn a_filter_narrows_a_listing(pool: PgPool) -> Result<(), StoreError> {
+    let store = PostgresStore::from_pool(pool);
+    store
+        .upsert(&key("SW1"), &json!({ "sku": "SW-1", "colour": "red" }))
+        .await?;
+    store
+        .upsert(&key("SW2"), &json!({ "sku": "SW-2", "colour": "blue" }))
+        .await?;
+    store
+        .upsert(&key("SW3"), &json!({ "sku": "SW-3", "colour": "red" }))
+        .await?;
+
+    let page = store
+        .list(
+            &source(),
+            &collection("catalog.product"),
+            &filter(&[("colour", "red")]),
+            None,
+            PageLimit::default(),
+        )
+        .await?;
+
+    let ids: Vec<&str> = page
+        .records
+        .iter()
+        .map(|record| record.key.id.as_str())
+        .collect();
+    assert_eq!(ids, ["SW1", "SW3"]);
+    Ok(())
+}
+
+#[sqlx::test]
+async fn filters_compose(pool: PgPool) -> Result<(), StoreError> {
+    let store = PostgresStore::from_pool(pool);
+    store
+        .upsert(&key("SW1"), &json!({ "sku": "SW-1", "colour": "red" }))
+        .await?;
+    store
+        .upsert(&key("SW2"), &json!({ "sku": "SW-2", "colour": "red" }))
+        .await?;
+
+    let page = store
+        .list(
+            &source(),
+            &collection("catalog.product"),
+            &filter(&[("colour", "red"), ("sku", "SW-2")]),
+            None,
+            PageLimit::default(),
+        )
+        .await?;
+
+    let ids: Vec<&str> = page
+        .records
+        .iter()
+        .map(|record| record.key.id.as_str())
+        .collect();
+    assert_eq!(ids, ["SW2"], "both conditions have to hold");
+    Ok(())
+}
+
+#[sqlx::test]
+async fn a_filter_never_reaches_a_tombstone(pool: PgPool) -> Result<(), StoreError> {
+    let store = PostgresStore::from_pool(pool);
+    store
+        .upsert(&key("SW1"), &json!({ "sku": "SW-1", "colour": "red" }))
+        .await?;
+    store.delete(&key("SW1")).await?;
+
+    let page = store
+        .list(
+            &source(),
+            &collection("catalog.product"),
+            &filter(&[("colour", "red")]),
+            None,
+            PageLimit::default(),
+        )
+        .await?;
+    assert!(page.records.is_empty());
+    Ok(())
+}
+
+#[sqlx::test]
+async fn a_filter_composes_with_the_cursor(pool: PgPool) -> Result<(), StoreError> {
+    let store = PostgresStore::from_pool(pool);
+    for id in ["SW1", "SW2", "SW3"] {
+        store
+            .upsert(&key(id), &json!({ "sku": id, "colour": "red" }))
+            .await?;
+    }
+    let red = filter(&[("colour", "red")]);
+
+    let first = store
+        .list(
+            &source(),
+            &collection("catalog.product"),
+            &red,
+            None,
+            PageLimit::clamp(2),
+        )
+        .await?;
+    assert_eq!(first.records.len(), 2);
+    let cursor = first.next.expect("a full page offers a cursor");
+
+    let second = store
+        .list(
+            &source(),
+            &collection("catalog.product"),
+            &red,
+            Some(cursor),
+            PageLimit::clamp(2),
+        )
+        .await?;
+    let ids: Vec<&str> = second
+        .records
+        .iter()
+        .map(|record| record.key.id.as_str())
+        .collect();
+    assert_eq!(ids, ["SW3"]);
+    Ok(())
+}
+
+#[sqlx::test]
+async fn a_filter_matches_by_structure_not_by_value_anywhere(
+    pool: PgPool,
+) -> Result<(), StoreError> {
+    // Containment is structural: a filter on a top-level field does not match the same value sitting
+    // one level down. Without that, filtering on `colour` would match a record whose *attributes*
+    // happened to contain it.
+    let store = PostgresStore::from_pool(pool);
+    store
+        .upsert(
+            &key("SW1"),
+            &json!({ "sku": "SW-1", "attributes": { "colour": "red" } }),
+        )
+        .await?;
+
+    let page = store
+        .list(
+            &source(),
+            &collection("catalog.product"),
+            &filter(&[("colour", "red")]),
+            None,
+            PageLimit::default(),
+        )
+        .await?;
+    assert!(page.records.is_empty());
+    Ok(())
+}
+
+#[sqlx::test]
+async fn a_statement_that_runs_too_long_is_cut_off(
+    _pool_options: PgPoolOptions,
+    connect_options: PgConnectOptions,
+) {
+    // The limit lives on the connection, so nothing has to remember to apply it. A public endpoint
+    // whose queries can run without bound is a denial-of-service vector, not a slow page.
+    let store = PostgresStore::connect_with(connect_options, 1, Duration::from_millis(200))
+        .await
+        .expect("connected");
+
+    let error = sqlx::query("SELECT pg_sleep(2)")
+        .execute(store.pool())
+        .await
+        .expect_err("the statement timeout must cut this off");
+
+    // 57014 is query_canceled: Postgres stopped it, rather than the client giving up.
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(sqlx::error::DatabaseError::code)
+            .as_deref(),
+        Some("57014"),
+        "unexpected error: {error}"
+    );
 }

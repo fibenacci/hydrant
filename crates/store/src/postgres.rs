@@ -1,11 +1,13 @@
 //! PostgreSQL implementation of [`Store`].
 
 use hydrant_core::{
-    CollectionName, ContentHash, RecordId, RecordKey, Seq, SourceName, collection_checksum,
+    CollectionName, ContentHash, Filter, RecordId, RecordKey, Seq, SourceName, collection_checksum,
     content_hash,
 };
+use std::time::Duration;
+
 use serde_json::Value;
-use sqlx::postgres::PgPoolOptions;
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{PgExecutor, PgPool};
 use time::OffsetDateTime;
 
@@ -24,15 +26,48 @@ pub struct PostgresStore {
 }
 
 impl PostgresStore {
-    /// Connects to `url` with at most `max_connections` pooled connections.
+    /// Connects to `url` with at most `max_connections` pooled connections, and a statement timeout
+    /// on every one of them.
     ///
     /// # Errors
     ///
-    /// Returns [`StoreError::Database`] if the connection cannot be established.
-    pub async fn connect(url: &str, max_connections: u32) -> Result<Self, StoreError> {
+    /// Returns [`StoreError::Database`] if `url` cannot be parsed or the connection fails.
+    pub async fn connect(
+        url: &str,
+        max_connections: u32,
+        statement_timeout: Duration,
+    ) -> Result<Self, StoreError> {
+        let options: PgConnectOptions = url.parse()?;
+        Self::connect_with(options, max_connections, statement_timeout).await
+    }
+
+    /// The same, from already-parsed connection options.
+    ///
+    /// The statement timeout is not a tuning knob: this service answers unauthenticated requests,
+    /// and a query that can run without bound is a denial-of-service vector rather than a slow page.
+    /// Setting it on the connection rather than per query means no code path can forget it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Database`] if the connection cannot be established or the timeout
+    /// cannot be set.
+    pub async fn connect_with(
+        options: PgConnectOptions,
+        max_connections: u32,
+        statement_timeout: Duration,
+    ) -> Result<Self, StoreError> {
+        let millis = statement_timeout.as_millis().min(u128::from(u32::MAX));
         let pool = PgPoolOptions::new()
             .max_connections(max_connections)
-            .connect(url)
+            .after_connect(move |connection, _| {
+                Box::pin(async move {
+                    sqlx::query(&format!("SET statement_timeout = {millis}"))
+                        .execute(connection)
+                        .await?;
+                    Ok(())
+                })
+            })
+            .connect_with(options)
             .await?;
         Ok(Self { pool })
     }
@@ -122,6 +157,7 @@ impl Store for PostgresStore {
         &self,
         source: &SourceName,
         collection: &CollectionName,
+        filter: &Filter,
         after: Option<Seq>,
         limit: PageLimit,
     ) -> Result<Page, StoreError> {
@@ -134,6 +170,7 @@ impl Store for PostgresStore {
                AND collection = $2
                AND deleted_at IS NULL
                AND seq > $3
+               AND payload @> $5
              ORDER BY seq
              LIMIT $4
             "#,
@@ -141,6 +178,7 @@ impl Store for PostgresStore {
             collection.as_str(),
             cursor(after)?,
             i64::from(limit.get()),
+            filter.as_json(),
         )
         .fetch_all(&self.pool)
         .await?;
