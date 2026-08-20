@@ -91,12 +91,24 @@ Then start the service:
 ```bash
 make run          # applies migrations, serves on 127.0.0.1:8080 by default
 curl -s localhost:8080/health
-curl -si localhost:8080/v1/sap-stage/catalog.product | head -20
 ```
 
-There is no ingest endpoint yet, so a fresh store serves empty collections. Every setting comes
-from the environment — see `.env.example`; there is no config file, because a file would be a
-second place to look when a setting is wrong.
+To put something in, mint a credential and push a batch. The token is printed once and is not
+recoverable, because only its HMAC is stored:
+
+```bash
+cargo run -p hydrant-server -- token mint --source sap-stage --label "local test"
+
+curl -X POST localhost:8080/v1/ingest/catalog.product \
+  -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -d '[{"op":"upsert","id":"SW1","payload":{"sku":"SW-1","price":9.99,"secret":"dropped"}}]'
+
+curl -s localhost:8080/v1/sap-stage/catalog.product/SW1
+```
+
+The response to the push names every field the schema did not release, and the read shows that
+those fields were never stored. Every setting comes from the environment — see `.env.example`;
+there is no config file, because a file would be a second place to look when a setting is wrong.
 
 ## Database and query metadata
 
