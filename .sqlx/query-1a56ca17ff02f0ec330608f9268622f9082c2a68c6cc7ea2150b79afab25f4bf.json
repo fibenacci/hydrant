@@ -1,0 +1,31 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT id, content_hash\n              FROM record\n             WHERE source = $1\n               AND collection = $2\n               AND deleted_at IS NULL\n               AND id > $3\n             ORDER BY id\n             LIMIT $4\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "content_hash",
+        "type_info": "Bytea"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "1a56ca17ff02f0ec330608f9268622f9082c2a68c6cc7ea2150b79afab25f4bf"
+}

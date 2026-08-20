@@ -1,14 +1,18 @@
 //! PostgreSQL implementation of [`Store`].
 
 use hydrant_core::{
-    CollectionName, ContentHash, RecordId, RecordKey, Seq, SourceName, content_hash,
+    CollectionName, ContentHash, RecordId, RecordKey, Seq, SourceName, collection_checksum,
+    content_hash,
 };
 use serde_json::Value;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgExecutor, PgPool};
+use time::OffsetDateTime;
 
 use crate::error::StoreError;
-use crate::record::{Deletion, IngestRecord, Page, PageLimit, StoredRecord, Upsert};
+use crate::record::{
+    Deletion, Digest, DigestPage, IngestRecord, Manifest, Page, PageLimit, StoredRecord, Upsert,
+};
 use crate::store::Store;
 
 /// A store backed by PostgreSQL.
@@ -120,10 +124,8 @@ impl Store for PostgresStore {
         after: Option<Seq>,
         limit: PageLimit,
     ) -> Result<Page, StoreError> {
-        let after = i64::try_from(after.map_or(0, Seq::get)).map_err(|_| StoreError::Corrupt {
-            reason: "cursor is beyond the range of a bigint".to_owned(),
-        })?;
-        let rows = sqlx::query!(
+        let rows = sqlx::query_as!(
+            RawRecord,
             r#"
             SELECT id, seq, payload, content_hash, ingested_at, deleted_at
               FROM record
@@ -136,36 +138,130 @@ impl Store for PostgresStore {
             "#,
             source.as_str(),
             collection.as_str(),
-            after,
+            cursor(after)?,
+            i64::from(limit.get()),
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        page(rows, source, collection, limit)
+    }
+
+    async fn changes(
+        &self,
+        source: &SourceName,
+        collection: &CollectionName,
+        since: Option<Seq>,
+        limit: PageLimit,
+    ) -> Result<Page, StoreError> {
+        // The one difference from `list`: no `deleted_at IS NULL`. A consumer replicating from a
+        // cursor has to see the tombstone, or it keeps serving a record that was deleted.
+        let rows = sqlx::query_as!(
+            RawRecord,
+            r#"
+            SELECT id, seq, payload, content_hash, ingested_at, deleted_at
+              FROM record
+             WHERE source = $1
+               AND collection = $2
+               AND seq > $3
+             ORDER BY seq
+             LIMIT $4
+            "#,
+            source.as_str(),
+            collection.as_str(),
+            cursor(since)?,
+            i64::from(limit.get()),
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        page(rows, source, collection, limit)
+    }
+
+    async fn manifest(
+        &self,
+        source: &SourceName,
+        collection: &CollectionName,
+    ) -> Result<Manifest, StoreError> {
+        // A full scan of the live rows. That is the honest cost of a checksum that is defined over
+        // the collection's contents; a maintained aggregate would be a cache with its own drift.
+        let rows = sqlx::query!(
+            r#"
+            SELECT id, content_hash
+              FROM record
+             WHERE source = $1
+               AND collection = $2
+               AND deleted_at IS NULL
+            "#,
+            source.as_str(),
+            collection.as_str(),
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut pairs = Vec::with_capacity(rows.len());
+        for row in rows {
+            pairs.push((row.id, to_content_hash(&row.content_hash)?));
+        }
+        let checksum = collection_checksum(pairs.iter().map(|(id, hash)| (id.as_str(), *hash)))?;
+        let count = u64::try_from(pairs.len()).map_err(|_| StoreError::Corrupt {
+            reason: "collection holds more records than a u64 can count".to_owned(),
+        })?;
+
+        Ok(Manifest {
+            count,
+            checksum,
+            max_seq: self.max_seq(source, collection).await?,
+        })
+    }
+
+    async fn digests(
+        &self,
+        source: &SourceName,
+        collection: &CollectionName,
+        after: Option<&RecordId>,
+        limit: PageLimit,
+    ) -> Result<DigestPage, StoreError> {
+        // Walked by id, not by feed position: a sender joins its own records to these by id, and a
+        // record that changed mid-walk would otherwise move past the cursor and be missed. Ordering
+        // and comparison both use the database's collation, so the walk stays consistent whatever
+        // that collation is.
+        let rows = sqlx::query!(
+            r#"
+            SELECT id, content_hash
+              FROM record
+             WHERE source = $1
+               AND collection = $2
+               AND deleted_at IS NULL
+               AND id > $3
+             ORDER BY id
+             LIMIT $4
+            "#,
+            source.as_str(),
+            collection.as_str(),
+            after.map_or("", RecordId::as_str),
             i64::from(limit.get()),
         )
         .fetch_all(&self.pool)
         .await?;
 
         let full_page = rows.len() == usize::from(limit.get());
-        let mut records = Vec::with_capacity(rows.len());
+        let mut entries = Vec::with_capacity(rows.len());
         for row in rows {
-            let id = RecordId::new(row.id).map_err(|error| StoreError::Corrupt {
-                reason: format!("stored id is not a usable identifier: {error}"),
-            })?;
-            records.push(StoredRecord {
-                key: RecordKey::new(source.clone(), collection.clone(), id),
-                payload: row.payload,
+            entries.push(Digest {
+                id: RecordId::new(row.id).map_err(|error| StoreError::Corrupt {
+                    reason: format!("stored id is not a usable identifier: {error}"),
+                })?,
                 content_hash: to_content_hash(&row.content_hash)?,
-                seq: to_seq(row.seq)?,
-                ingested_at: row.ingested_at,
-                deleted_at: row.deleted_at,
             });
         }
 
-        // Only a full page promises there may be more. A short page ends the walk, which is what
-        // lets a consumer stop without a second request.
         let next = if full_page {
-            records.last().map(|record| record.seq)
+            entries.last().map(|entry| entry.id.clone())
         } else {
             None
         };
-        Ok(Page { records, next })
+        Ok(DigestPage { entries, next })
     }
 
     async fn max_seq(
@@ -256,6 +352,69 @@ where
         Some(seq) => Ok(Upsert::Stored { seq: to_seq(seq)? }),
         None => Ok(Upsert::Unchanged),
     }
+}
+
+/// A row of the record table, before it becomes a [`StoredRecord`].
+///
+/// Named rather than anonymous so the listing and the change feed share one mapping: two copies of
+/// it would be two places for a column to be read wrongly.
+struct RawRecord {
+    id: String,
+    seq: i64,
+    payload: Value,
+    content_hash: Vec<u8>,
+    ingested_at: OffsetDateTime,
+    deleted_at: Option<OffsetDateTime>,
+}
+
+impl RawRecord {
+    fn into_record(
+        self,
+        source: &SourceName,
+        collection: &CollectionName,
+    ) -> Result<StoredRecord, StoreError> {
+        let id = RecordId::new(self.id).map_err(|error| StoreError::Corrupt {
+            reason: format!("stored id is not a usable identifier: {error}"),
+        })?;
+        Ok(StoredRecord {
+            key: RecordKey::new(source.clone(), collection.clone(), id),
+            payload: self.payload,
+            content_hash: to_content_hash(&self.content_hash)?,
+            seq: to_seq(self.seq)?,
+            ingested_at: self.ingested_at,
+            deleted_at: self.deleted_at,
+        })
+    }
+}
+
+/// Turns rows into a page.
+///
+/// Only a full page promises there may be more. A short page ends the walk, which is what lets a
+/// consumer stop without a second request.
+fn page(
+    rows: Vec<RawRecord>,
+    source: &SourceName,
+    collection: &CollectionName,
+    limit: PageLimit,
+) -> Result<Page, StoreError> {
+    let full_page = rows.len() == usize::from(limit.get());
+    let records = rows
+        .into_iter()
+        .map(|row| row.into_record(source, collection))
+        .collect::<Result<Vec<_>, _>>()?;
+    let next = if full_page {
+        records.last().map(|record| record.seq)
+    } else {
+        None
+    };
+    Ok(Page { records, next })
+}
+
+/// A feed cursor as the database wants it.
+fn cursor(after: Option<Seq>) -> Result<i64, StoreError> {
+    i64::try_from(after.map_or(0, Seq::get)).map_err(|_| StoreError::Corrupt {
+        reason: "cursor is beyond the range of a bigint".to_owned(),
+    })
 }
 
 /// `seq` is a positive bigint in the schema; a negative one means the sequence was tampered with.

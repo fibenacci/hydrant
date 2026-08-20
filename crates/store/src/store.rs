@@ -1,12 +1,14 @@
 //! The storage contract.
 
-use hydrant_core::{CollectionName, RecordKey, SourceName};
+use hydrant_core::{CollectionName, RecordId, RecordKey, SourceName};
 use serde_json::Value;
 
 use crate::error::StoreError;
 use hydrant_core::Seq;
 
-use crate::record::{Deletion, IngestRecord, Page, PageLimit, StoredRecord, Upsert};
+use crate::record::{
+    Deletion, DigestPage, IngestRecord, Manifest, Page, PageLimit, StoredRecord, Upsert,
+};
 
 /// What hydrant needs from a store.
 ///
@@ -72,6 +74,53 @@ pub trait Store: Send + Sync {
         after: Option<Seq>,
         limit: PageLimit,
     ) -> impl Future<Output = Result<Page, StoreError>> + Send;
+
+    /// One page of the change feed: every change after `since`, tombstones included.
+    ///
+    /// This is the difference from [`Store::list`], and it is the point of keeping tombstones at
+    /// all. A consumer replicating from a cursor has to observe a deletion; a removed row would
+    /// simply stop appearing and the consumer would keep serving what it last saw.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] if the database rejects the query or a row cannot be read back as a
+    /// record.
+    fn changes(
+        &self,
+        source: &SourceName,
+        collection: &CollectionName,
+        since: Option<Seq>,
+        limit: PageLimit,
+    ) -> impl Future<Output = Result<Page, StoreError>> + Send;
+
+    /// The collection's count, checksum and feed position.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] if the database rejects the query, a row cannot be read back, or the
+    /// pairs cannot be canonicalised.
+    fn manifest(
+        &self,
+        source: &SourceName,
+        collection: &CollectionName,
+    ) -> impl Future<Output = Result<Manifest, StoreError>> + Send;
+
+    /// One page of per-record digests, in id order, tombstones excluded.
+    ///
+    /// A checksum can only say *that* a collection drifted. These say which record — and comparing
+    /// two hashes is what turns "something is wrong" into "re-push this one". Walking by id rather
+    /// than by feed position is what lets a sender join the two sides.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] if the database rejects the query or a row cannot be read back.
+    fn digests(
+        &self,
+        source: &SourceName,
+        collection: &CollectionName,
+        after: Option<&RecordId>,
+        limit: PageLimit,
+    ) -> impl Future<Output = Result<DigestPage, StoreError>> + Send;
 
     /// The highest feed position in a collection, tombstones included.
     ///

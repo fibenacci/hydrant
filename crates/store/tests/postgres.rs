@@ -7,7 +7,9 @@
 // denies both lints.
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-use hydrant_core::{CollectionName, ContentHash, RecordId, RecordKey, SourceName};
+use hydrant_core::{
+    CollectionName, ContentHash, RecordId, RecordKey, SourceName, collection_checksum,
+};
 use hydrant_store::{Deletion, IngestRecord, PageLimit, PostgresStore, Store, StoreError, Upsert};
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -413,5 +415,192 @@ async fn the_cache_validator_moves_when_a_record_is_deleted(
 
     assert!(after_delete > after_write);
     assert_eq!(after_delete, tombstone);
+    Ok(())
+}
+
+#[sqlx::test]
+async fn the_change_feed_carries_tombstones(pool: PgPool) -> Result<(), StoreError> {
+    let store = PostgresStore::from_pool(pool);
+    store.upsert(&key("SW1"), &json!({ "sku": "SW-1" })).await?;
+    store.upsert(&key("SW2"), &json!({ "sku": "SW-2" })).await?;
+    store.delete(&key("SW1")).await?;
+
+    let feed = store
+        .changes(
+            &source(),
+            &collection("catalog.product"),
+            None,
+            PageLimit::default(),
+        )
+        .await?;
+
+    // SW2 first (written second, but SW1 moved to the end when it was deleted).
+    let ids: Vec<&str> = feed
+        .records
+        .iter()
+        .map(|record| record.key.id.as_str())
+        .collect();
+    assert_eq!(ids, ["SW2", "SW1"]);
+
+    let tombstone = feed.records.last().expect("the deletion");
+    assert!(
+        tombstone.is_deleted(),
+        "a consumer has to be able to observe the deletion"
+    );
+    assert_eq!(tombstone.payload, json!({}));
+    Ok(())
+}
+
+#[sqlx::test]
+async fn the_change_feed_resumes_after_a_cursor(pool: PgPool) -> Result<(), StoreError> {
+    let store = PostgresStore::from_pool(pool);
+    let first = store
+        .upsert(&key("SW1"), &json!({ "a": 1 }))
+        .await?
+        .seq()
+        .expect("stored");
+    store.upsert(&key("SW2"), &json!({ "a": 2 })).await?;
+
+    let feed = store
+        .changes(
+            &source(),
+            &collection("catalog.product"),
+            Some(first),
+            PageLimit::default(),
+        )
+        .await?;
+    let ids: Vec<&str> = feed
+        .records
+        .iter()
+        .map(|record| record.key.id.as_str())
+        .collect();
+    assert_eq!(ids, ["SW2"], "everything up to the cursor is already known");
+    Ok(())
+}
+
+#[sqlx::test]
+async fn an_unchanged_upsert_produces_no_feed_entry(pool: PgPool) -> Result<(), StoreError> {
+    let store = PostgresStore::from_pool(pool);
+    let payload = json!({ "sku": "SW-1" });
+    store.upsert(&key("SW1"), &payload).await?;
+    store.upsert(&key("SW1"), &payload).await?;
+    store.upsert(&key("SW1"), &payload).await?;
+
+    let feed = store
+        .changes(
+            &source(),
+            &collection("catalog.product"),
+            None,
+            PageLimit::default(),
+        )
+        .await?;
+    assert_eq!(feed.records.len(), 1, "three pushes, one change");
+    Ok(())
+}
+
+#[sqlx::test]
+async fn a_manifest_describes_the_live_records(pool: PgPool) -> Result<(), StoreError> {
+    let store = PostgresStore::from_pool(pool);
+    let live = json!({ "sku": "SW-2" });
+    store.upsert(&key("SW1"), &json!({ "sku": "SW-1" })).await?;
+    store.upsert(&key("SW2"), &live).await?;
+    let tombstone = store.delete(&key("SW1")).await?.seq().expect("tombstoned");
+
+    let manifest = store
+        .manifest(&source(), &collection("catalog.product"))
+        .await?;
+    assert_eq!(
+        manifest.count, 1,
+        "a tombstone is not a record the collection holds"
+    );
+    assert_eq!(
+        manifest.max_seq,
+        Some(tombstone),
+        "but it does move the feed position, because it changed what is served"
+    );
+
+    // The checksum a sender computes from its own side has to match, or drift detection is
+    // meaningless. This is that computation, done independently of the store.
+    let expected = collection_checksum([("SW2", hydrant_core::content_hash(&live).expect("hash"))])
+        .expect("checksum");
+    assert_eq!(manifest.checksum, expected);
+    Ok(())
+}
+
+#[sqlx::test]
+async fn a_manifest_of_an_untouched_collection_is_stable(pool: PgPool) -> Result<(), StoreError> {
+    let store = PostgresStore::from_pool(pool);
+    let manifest = store
+        .manifest(&source(), &collection("catalog.nothing"))
+        .await?;
+
+    assert_eq!(manifest.count, 0);
+    assert_eq!(manifest.max_seq, None);
+    assert_eq!(
+        manifest.checksum,
+        collection_checksum(std::iter::empty()).expect("checksum")
+    );
+    Ok(())
+}
+
+#[sqlx::test]
+async fn digests_walk_by_id_and_skip_tombstones(pool: PgPool) -> Result<(), StoreError> {
+    let store = PostgresStore::from_pool(pool);
+    for id in ["SW3", "SW1", "SW2"] {
+        store.upsert(&key(id), &json!({ "sku": id })).await?;
+    }
+    store.delete(&key("SW2")).await?;
+
+    let page = store
+        .digests(
+            &source(),
+            &collection("catalog.product"),
+            None,
+            PageLimit::default(),
+        )
+        .await?;
+    let ids: Vec<&str> = page.entries.iter().map(|entry| entry.id.as_str()).collect();
+    assert_eq!(ids, ["SW1", "SW3"], "id order, and no tombstones");
+    assert_eq!(
+        page.entries[0].content_hash,
+        hydrant_core::content_hash(&json!({ "sku": "SW1" })).expect("hash")
+    );
+    Ok(())
+}
+
+#[sqlx::test]
+async fn digests_page_from_the_last_id_seen(pool: PgPool) -> Result<(), StoreError> {
+    let store = PostgresStore::from_pool(pool);
+    for id in ["SW1", "SW2", "SW3"] {
+        store.upsert(&key(id), &json!({ "sku": id })).await?;
+    }
+
+    let first = store
+        .digests(
+            &source(),
+            &collection("catalog.product"),
+            None,
+            PageLimit::clamp(2),
+        )
+        .await?;
+    assert_eq!(first.entries.len(), 2);
+    let cursor = first.next.expect("a full page offers a cursor");
+    assert_eq!(cursor.as_str(), "SW2");
+
+    let second = store
+        .digests(
+            &source(),
+            &collection("catalog.product"),
+            Some(&cursor),
+            PageLimit::clamp(2),
+        )
+        .await?;
+    let ids: Vec<&str> = second
+        .entries
+        .iter()
+        .map(|entry| entry.id.as_str())
+        .collect();
+    assert_eq!(ids, ["SW3"]);
+    assert_eq!(second.next, None);
     Ok(())
 }

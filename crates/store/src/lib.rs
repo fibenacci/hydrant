@@ -18,5 +18,7 @@ pub mod store;
 
 pub use error::StoreError;
 pub use postgres::PostgresStore;
-pub use record::{Deletion, IngestRecord, Page, PageLimit, StoredRecord, Upsert};
+pub use record::{
+    Deletion, Digest, DigestPage, IngestRecord, Manifest, Page, PageLimit, StoredRecord, Upsert,
+};
 pub use store::Store;

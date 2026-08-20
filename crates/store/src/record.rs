@@ -91,6 +91,40 @@ pub struct Page {
     pub next: Option<Seq>,
 }
 
+/// A collection summarised for drift detection.
+///
+/// `count` and `checksum` describe the live records; `max_seq` includes tombstones, because it is
+/// also the cache validator and a deletion changes what the collection serves. The asymmetry is
+/// deliberate: a sender compares its own live set against `count` and `checksum`, and a deleted
+/// record is not in either side's live set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Manifest {
+    /// How many live records the collection holds.
+    pub count: u64,
+    /// SHA-256 over the canonical form of the live `[id, hash]` pairs.
+    pub checksum: ContentHash,
+    /// The highest feed position, tombstones included, or `None` for an untouched collection.
+    pub max_seq: Option<Seq>,
+}
+
+/// One record's identity and content hash.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Digest {
+    /// The record's identifier.
+    pub id: RecordId,
+    /// SHA-256 over its payload's canonical form.
+    pub content_hash: ContentHash,
+}
+
+/// One page of digests, walked by id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DigestPage {
+    /// The digests, in id order.
+    pub entries: Vec<Digest>,
+    /// The id to pass as `after` for the next page, or `None` when the page was not full.
+    pub next: Option<RecordId>,
+}
+
 /// What an upsert did.
 ///
 /// The distinction is the whole point of hashing content: a sender may push the same payload as
