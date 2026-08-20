@@ -60,6 +60,9 @@ axum = "0.8"
 tracing = "0.1"
 tower = "0.5"
 http-body-util = "0.1"
+# serde_yaml is archived and serde_yml unmaintained; serde_yaml_ng is the fork that
+# is still getting releases.
+serde_yaml_ng = "0.10"
 tower-http = "0.7"
 figment = { version = "0.10", features = ["env"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

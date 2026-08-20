@@ -5,6 +5,7 @@
 //! name every PostgreSQL tool already uses.
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 
 use figment::providers::{Env, Serialized};
 use figment::{Figment, Provider};
@@ -19,8 +20,11 @@ pub struct Config {
     pub listen: SocketAddr,
     /// Upper bound on pooled database connections.
     pub max_connections: u32,
-    /// `s-maxage` sent on cacheable responses, in seconds.
-    pub shared_max_age: u32,
+    /// Directory of collection definitions, read at startup.
+    ///
+    /// Cache directives are per collection and come from these files, which is why there is no
+    /// global `s-maxage` setting to disagree with them.
+    pub schemas_dir: PathBuf,
     /// Whether to apply pending migrations at startup.
     ///
     /// On by default: hydrant is a single-writer service, and a first run against an empty database
@@ -38,7 +42,7 @@ impl Default for Config {
             database_url: String::new(),
             listen: SocketAddr::from(([0, 0, 0, 0], 8080)),
             max_connections: 10,
-            shared_max_age: 300,
+            schemas_dir: PathBuf::from("schemas"),
             migrate_on_start: true,
             request_timeout: 10,
             log: "info".to_owned(),
@@ -113,7 +117,7 @@ mod tests {
             jail.set_env("HYDRANT_DATABASE_URL", "postgres://localhost/hydrant");
             let config = Config::from_provider(Env::prefixed("HYDRANT_")).expect("config");
             assert_eq!(config.listen.port(), 8080);
-            assert_eq!(config.shared_max_age, 300);
+            assert_eq!(config.schemas_dir, PathBuf::from("schemas"));
             assert!(config.migrate_on_start);
             Ok(())
         });

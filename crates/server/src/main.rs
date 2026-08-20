@@ -1,6 +1,7 @@
 //! The hydrant binary: configuration, telemetry, and the public read API.
 
 mod config;
+mod schemas;
 
 use std::error::Error;
 use std::time::Duration;
@@ -9,6 +10,7 @@ use axum::Router;
 use axum::http::header::{ETAG, IF_NONE_MATCH};
 use axum::http::{Method, StatusCode};
 use hydrant_api::{ApiState, router};
+use hydrant_core::SchemaSet;
 use hydrant_store::PostgresStore;
 use tokio::net::TcpListener;
 use tokio::signal;
@@ -25,6 +27,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let config = Config::load()?;
     init_telemetry(&config.log);
 
+    // Schemas first: a service that cannot read them serves nothing, and finding that out after
+    // binding the port would mean answering requests with 404s that look like missing data.
+    let schemas = schemas::load(&config.schemas_dir)?;
+    tracing::info!(collections = schemas.len(), "collection definitions loaded");
+
     let store = PostgresStore::connect(&config.database_url, config.max_connections).await?;
     if config.migrate_on_start {
         store.migrate().await?;
@@ -34,14 +41,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let listener = TcpListener::bind(config.listen).await?;
     tracing::info!(address = %listener.local_addr()?, "serving the public read API");
 
-    axum::serve(listener, service(store, &config))
+    axum::serve(listener, service(store, schemas, &config))
         .with_graceful_shutdown(shutdown())
         .await?;
     Ok(())
 }
 
 /// The router with the layers a public endpoint needs.
-fn service(store: PostgresStore, config: &Config) -> Router {
+fn service(store: PostgresStore, schemas: SchemaSet, config: &Config) -> Router {
     // CORS is wide open on purpose: the data is public, and a browser consumer is as legitimate as
     // any other. `expose_headers` is the part that is easy to miss — without it a browser can send
     // a conditional request but cannot read the ETag to build the next one.
@@ -51,7 +58,7 @@ fn service(store: PostgresStore, config: &Config) -> Router {
         .allow_headers([IF_NONE_MATCH])
         .expose_headers([ETAG]);
 
-    router(ApiState::new(store, config.shared_max_age))
+    router(ApiState::new(store, schemas))
         // 503 rather than the default 408: the client was not slow, the service gave up. A CDN
         // reads that as retriable, which is what it is.
         .layer(TimeoutLayer::with_status_code(

@@ -20,9 +20,11 @@ workspace = true
 axum = { workspace = true }
 figment = { workspace = true }
 hydrant-api = { workspace = true }
+hydrant-core = { workspace = true }
 hydrant-store = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
-thiserror.workspace = true
+serde_yaml_ng = { workspace = true }
+thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "net"] }
 tower-http = { workspace = true, features = ["trace", "compression-gzip", "cors", "timeout"] }
 tracing = { workspace = true }
