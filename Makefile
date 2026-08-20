@@ -114,6 +114,10 @@ sqlx-verify: ## Verify .sqlx if sqlx-cli is installed, otherwise say so
 build: ## Debug build of the whole workspace
 	$(CARGO) build --workspace $(CARGO_LOCKED)
 
+.PHONY: run
+run: ## Run the service against $DATABASE_URL (Ctrl-C stops it)
+	$(CARGO) run -p hydrant-server $(ARGS)
+
 .PHONY: release
 release: ## Optimized release build
 	$(CARGO) build --release --workspace $(CARGO_LOCKED)
