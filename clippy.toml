@@ -1,8 +1,12 @@
 # Keep clippy's suggestions inside what the MSRV can express.
-msrv = "1.85"
+msrv = "1.88"
 
 # `unwrap_used` and `expect_used` are warned on in the workspace lints because a
 # panic in the projection path is a dropped record. In tests they are the clearest
 # way to assert, so they stay allowed there.
 allow-unwrap-in-tests = true
 allow-expect-in-tests = true
+
+# `doc_markdown` wants unknown CamelCase words in backticks, which is right for identifiers and
+# wrong for product names. `..` keeps clippy's own default list rather than replacing it.
+doc-valid-idents = ["PostgreSQL", "OpenAPI", "ECMAScript", ".."]
