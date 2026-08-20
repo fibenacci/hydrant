@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE record\n               SET payload = '{}'::jsonb,\n                   content_hash = $4,\n                   seq = nextval('record_seq'),\n                   ingested_at = now(),\n                   deleted_at = now()\n             WHERE source = $1\n               AND collection = $2\n               AND id = $3\n               AND deleted_at IS NULL\n            RETURNING seq\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "seq",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Bytea"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "36e3149a4473ab7c961f53f8d9244af950a678f2c4ac3424b354ac514a91acc8"
+}

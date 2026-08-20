@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO record (source, collection, id, payload, content_hash)\n        VALUES ($1, $2, $3, $4, $5)\n        ON CONFLICT (source, collection, id) DO UPDATE\n           SET payload = excluded.payload,\n               content_hash = excluded.content_hash,\n               seq = nextval('record_seq'),\n               ingested_at = now(),\n               deleted_at = NULL\n         WHERE record.content_hash <> excluded.content_hash\n            OR record.deleted_at IS NOT NULL\n        RETURNING seq\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "seq",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Jsonb",
+        "Bytea"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "3965c76a5e519ece2c70e9b19642cc9c535191fe30261019d358d82f59d4e66c"
+}
