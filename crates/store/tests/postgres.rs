@@ -10,7 +10,9 @@
 use hydrant_core::{
     CollectionName, ContentHash, RecordId, RecordKey, SourceName, collection_checksum,
 };
-use hydrant_store::{Deletion, IngestRecord, PageLimit, PostgresStore, Store, StoreError, Upsert};
+use hydrant_store::{
+    Applied, Deletion, IngestOp, PageLimit, PostgresStore, Store, StoreError, Token, Upsert,
+};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 
@@ -30,10 +32,16 @@ fn key(id: &str) -> RecordKey {
     )
 }
 
-fn record(id: &str, payload: Value) -> IngestRecord {
-    IngestRecord {
+fn upsert(id: &str, payload: Value) -> IngestOp {
+    IngestOp::Upsert {
         id: RecordId::new(id).expect("valid id"),
         payload,
+    }
+}
+
+fn delete(id: &str) -> IngestOp {
+    IngestOp::Delete {
+        id: RecordId::new(id).expect("valid id"),
     }
 }
 
@@ -203,26 +211,26 @@ async fn feed_positions_are_global_across_collections(pool: PgPool) -> Result<()
 async fn a_batch_reports_one_outcome_per_record_in_order(pool: PgPool) -> Result<(), StoreError> {
     let store = PostgresStore::from_pool(pool);
     let records = vec![
-        record("SW1", json!({ "sku": "SW-1" })),
-        record("SW2", json!({ "sku": "SW-2" })),
-        record("SW3", json!({ "sku": "SW-3" })),
+        upsert("SW1", json!({ "sku": "SW-1" })),
+        upsert("SW2", json!({ "sku": "SW-2" })),
+        upsert("SW3", json!({ "sku": "SW-3" })),
     ];
 
     let first = store
-        .upsert_batch(&source(), &collection("catalog.product"), &records)
+        .apply(&source(), &collection("catalog.product"), &records)
         .await?;
     assert_eq!(first.len(), 3);
     assert!(
         first
             .iter()
-            .all(|outcome| matches!(outcome, Upsert::Stored { .. }))
+            .all(|outcome| matches!(outcome, Applied::Stored { .. }))
     );
 
     // The same batch again: every payload is unchanged, so nothing is written at all.
     let again = store
-        .upsert_batch(&source(), &collection("catalog.product"), &records)
+        .apply(&source(), &collection("catalog.product"), &records)
         .await?;
-    assert_eq!(again, vec![Upsert::Unchanged; 3]);
+    assert_eq!(again, vec![Applied::Unchanged; 3]);
     Ok(())
 }
 
@@ -232,17 +240,17 @@ async fn a_repeated_id_inside_one_batch_behaves_like_two_requests(
 ) -> Result<(), StoreError> {
     let store = PostgresStore::from_pool(pool);
     let records = vec![
-        record("SW1", json!({ "sku": "first" })),
-        record("SW1", json!({ "sku": "second" })),
+        upsert("SW1", json!({ "sku": "first" })),
+        upsert("SW1", json!({ "sku": "second" })),
     ];
 
     let outcomes = store
-        .upsert_batch(&source(), &collection("catalog.product"), &records)
+        .apply(&source(), &collection("catalog.product"), &records)
         .await?;
     assert!(
         outcomes
             .iter()
-            .all(|outcome| matches!(outcome, Upsert::Stored { .. }))
+            .all(|outcome| matches!(outcome, Applied::Stored { .. }))
     );
     assert_eq!(
         store.get(&key("SW1")).await?.expect("record").payload,
@@ -254,7 +262,7 @@ async fn a_repeated_id_inside_one_batch_behaves_like_two_requests(
 #[sqlx::test]
 async fn a_failed_batch_writes_nothing(pool: PgPool) -> Result<(), StoreError> {
     let store = PostgresStore::from_pool(pool.clone());
-    let records = vec![record("SW1", json!({ "sku": "SW-1" }))];
+    let records = vec![upsert("SW1", json!({ "sku": "SW-1" }))];
 
     // Drop the table out from under the transaction so the batch fails mid-flight rather than at
     // the boundary; the point is that a partial batch leaves nothing behind.
@@ -262,7 +270,7 @@ async fn a_failed_batch_writes_nothing(pool: PgPool) -> Result<(), StoreError> {
         .execute(&pool)
         .await?;
     let failed = store
-        .upsert_batch(&source(), &collection("catalog.product"), &records)
+        .apply(&source(), &collection("catalog.product"), &records)
         .await;
     assert!(
         matches!(failed, Err(StoreError::Database(_))),
@@ -602,5 +610,125 @@ async fn digests_page_from_the_last_id_seen(pool: PgPool) -> Result<(), StoreErr
         .collect();
     assert_eq!(ids, ["SW3"]);
     assert_eq!(second.next, None);
+    Ok(())
+}
+
+#[sqlx::test]
+async fn a_batch_applies_writes_and_deletions_in_the_order_given(
+    pool: PgPool,
+) -> Result<(), StoreError> {
+    let store = PostgresStore::from_pool(pool);
+    let ops = vec![
+        upsert("SW1", json!({ "sku": "SW-1" })),
+        upsert("SW2", json!({ "sku": "SW-2" })),
+        delete("SW1"),
+        delete("SW3"),
+    ];
+
+    let outcomes = store
+        .apply(&source(), &collection("catalog.product"), &ops)
+        .await?;
+    assert!(matches!(outcomes[0], Applied::Stored { .. }));
+    assert!(matches!(outcomes[1], Applied::Stored { .. }));
+    assert!(
+        matches!(outcomes[2], Applied::Tombstoned { .. }),
+        "written, then deleted"
+    );
+    assert_eq!(
+        outcomes[3],
+        Applied::Unchanged,
+        "there was no SW3 to delete"
+    );
+
+    assert!(store.get(&key("SW1")).await?.expect("record").is_deleted());
+    assert!(!store.get(&key("SW2")).await?.expect("record").is_deleted());
+    Ok(())
+}
+
+#[sqlx::test]
+async fn a_credential_resolves_to_its_source(pool: PgPool) -> Result<(), StoreError> {
+    let store = PostgresStore::from_pool(pool);
+    let token = Token::generate().expect("randomness");
+    let hash = token.hash(b"application secret").expect("usable secret");
+
+    store
+        .store_token(&hash, &source(), "sap-prod outbox")
+        .await?;
+
+    assert_eq!(store.authenticate(&hash).await?, Some(source()));
+    Ok(())
+}
+
+#[sqlx::test]
+async fn an_unknown_credential_resolves_to_nothing(pool: PgPool) -> Result<(), StoreError> {
+    let store = PostgresStore::from_pool(pool);
+    let hash = Token::generate()
+        .expect("randomness")
+        .hash(b"secret")
+        .expect("usable secret");
+    assert_eq!(store.authenticate(&hash).await?, None);
+    Ok(())
+}
+
+#[sqlx::test]
+async fn the_same_token_under_a_different_secret_does_not_authenticate(
+    pool: PgPool,
+) -> Result<(), StoreError> {
+    // The stored form is keyed by the application secret, which is what makes a database dump
+    // useless on its own: the same token hashed under another key is another credential.
+    let store = PostgresStore::from_pool(pool);
+    let token = Token::generate().expect("randomness");
+    store
+        .store_token(
+            &token.hash(b"real secret").expect("hash"),
+            &source(),
+            "outbox",
+        )
+        .await?;
+
+    let elsewhere = token.hash(b"guessed secret").expect("hash");
+    assert_eq!(store.authenticate(&elsewhere).await?, None);
+    Ok(())
+}
+
+#[sqlx::test]
+async fn a_revoked_credential_stops_working_but_stays_on_record(
+    pool: PgPool,
+) -> Result<(), StoreError> {
+    let store = PostgresStore::from_pool(pool.clone());
+    let hash = Token::generate()
+        .expect("randomness")
+        .hash(b"secret")
+        .expect("hash");
+    store
+        .store_token(&hash, &source(), "laptop of the integrator")
+        .await?;
+
+    sqlx::query("UPDATE ingest_token SET revoked_at = now()")
+        .execute(&pool)
+        .await?;
+    assert_eq!(store.authenticate(&hash).await?, None);
+
+    let remaining: i64 = sqlx::query_scalar("SELECT count(*) FROM ingest_token")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(
+        remaining, 1,
+        "knowing a credential existed is worth the row"
+    );
+    Ok(())
+}
+
+#[sqlx::test]
+async fn a_token_cannot_be_recorded_twice(pool: PgPool) -> Result<(), StoreError> {
+    let store = PostgresStore::from_pool(pool);
+    let hash = Token::generate()
+        .expect("randomness")
+        .hash(b"secret")
+        .expect("hash");
+    store.store_token(&hash, &source(), "first").await?;
+
+    let again = store.store_token(&hash, &source(), "second").await;
+    assert!(matches!(again, Err(StoreError::Database(_))));
     Ok(())
 }

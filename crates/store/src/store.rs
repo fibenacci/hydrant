@@ -7,8 +7,9 @@ use crate::error::StoreError;
 use hydrant_core::Seq;
 
 use crate::record::{
-    Deletion, DigestPage, IngestRecord, Manifest, Page, PageLimit, StoredRecord, Upsert,
+    Applied, Deletion, DigestPage, IngestOp, Manifest, Page, PageLimit, StoredRecord, Upsert,
 };
+use crate::token::TokenHash;
 
 /// What hydrant needs from a store.
 ///
@@ -35,21 +36,22 @@ pub trait Store: Send + Sync {
         payload: &Value,
     ) -> impl Future<Output = Result<Upsert, StoreError>> + Send;
 
-    /// Writes a batch of records of one collection, in one transaction.
+    /// Applies a batch of operations to one collection, in one transaction.
     ///
-    /// Outcomes come back in the order the records were given. Repeating an id inside one batch is
-    /// allowed: the later entry sees the earlier one, exactly as two separate requests would.
+    /// Outcomes come back in the order the operations were given. Repeating an id inside one batch
+    /// is allowed: the later operation sees the earlier one, exactly as two separate requests would,
+    /// which is what makes an upsert followed by a delete behave the way a sender wrote it.
     ///
     /// # Errors
     ///
-    /// Returns [`StoreError`] if any payload cannot be canonicalised or the transaction fails, in
+    /// Returns [`StoreError`] if a payload cannot be canonicalised or the transaction fails, in
     /// which case nothing in the batch was written.
-    fn upsert_batch(
+    fn apply(
         &self,
         source: &SourceName,
         collection: &CollectionName,
-        records: &[IngestRecord],
-    ) -> impl Future<Output = Result<Vec<Upsert>, StoreError>> + Send;
+        ops: &[IngestOp],
+    ) -> impl Future<Output = Result<Vec<Applied>, StoreError>> + Send;
 
     /// Turns a record into a tombstone.
     ///
@@ -57,6 +59,34 @@ pub trait Store: Send + Sync {
     ///
     /// Returns [`StoreError`] if the database rejects the write.
     fn delete(&self, key: &RecordKey) -> impl Future<Output = Result<Deletion, StoreError>> + Send;
+
+    /// Resolves an ingest credential to the source it may write to.
+    ///
+    /// Takes the hashed form, never the token: the plaintext has no business below the HTTP layer,
+    /// and the lookup is a primary-key hit on a MAC rather than a comparison in application code.
+    /// A revoked credential resolves to nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] if the database rejects the query or the stored source name is not a
+    /// usable identifier.
+    fn authenticate(
+        &self,
+        token: &TokenHash,
+    ) -> impl Future<Output = Result<Option<SourceName>, StoreError>> + Send;
+
+    /// Records a credential for `source`, under a label that says who holds it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] if the database rejects the write - including when the same token is
+    /// recorded twice.
+    fn store_token(
+        &self,
+        token: &TokenHash,
+        source: &SourceName,
+        label: &str,
+    ) -> impl Future<Output = Result<(), StoreError>> + Send;
 
     /// Reads one page of a collection in feed order, tombstones excluded.
     ///

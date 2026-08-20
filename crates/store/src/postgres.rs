@@ -11,9 +11,11 @@ use time::OffsetDateTime;
 
 use crate::error::StoreError;
 use crate::record::{
-    Deletion, Digest, DigestPage, IngestRecord, Manifest, Page, PageLimit, StoredRecord, Upsert,
+    Applied, Deletion, Digest, DigestPage, IngestOp, Manifest, Page, PageLimit, StoredRecord,
+    Upsert,
 };
 use crate::store::Store;
+use crate::token::TokenHash;
 
 /// A store backed by PostgreSQL.
 #[derive(Debug, Clone)]
@@ -65,56 +67,55 @@ impl Store for PostgresStore {
         write_upsert(&self.pool, key, payload, &hash).await
     }
 
-    async fn upsert_batch(
+    async fn apply(
         &self,
         source: &SourceName,
         collection: &CollectionName,
-        records: &[IngestRecord],
-    ) -> Result<Vec<Upsert>, StoreError> {
+        ops: &[IngestOp],
+    ) -> Result<Vec<Applied>, StoreError> {
         // Hash before opening the transaction: a payload that cannot be canonicalised should not
         // hold a connection, and it fails the whole batch either way.
-        let mut hashed = Vec::with_capacity(records.len());
-        for record in records {
-            hashed.push((record, content_hash(&record.payload)?));
+        let mut hashed = Vec::with_capacity(ops.len());
+        for op in ops {
+            let hash = match op {
+                IngestOp::Upsert { payload, .. } => Some(content_hash(payload)?),
+                IngestOp::Delete { .. } => None,
+            };
+            hashed.push((op, hash));
         }
 
         let mut transaction = self.pool.begin().await?;
-        let mut outcomes = Vec::with_capacity(records.len());
-        for (record, hash) in hashed {
-            let key = RecordKey::new(source.clone(), collection.clone(), record.id.clone());
-            outcomes.push(write_upsert(&mut *transaction, &key, &record.payload, &hash).await?);
+        let mut outcomes = Vec::with_capacity(ops.len());
+        for (op, hash) in hashed {
+            let key = RecordKey::new(source.clone(), collection.clone(), op.id().clone());
+            let outcome = match (op, hash) {
+                (IngestOp::Upsert { payload, .. }, Some(hash)) => {
+                    match write_upsert(&mut *transaction, &key, payload, &hash).await? {
+                        Upsert::Stored { seq } => Applied::Stored { seq },
+                        Upsert::Unchanged => Applied::Unchanged,
+                    }
+                }
+                (IngestOp::Delete { .. }, _) => {
+                    match write_delete(&mut *transaction, &key).await? {
+                        Deletion::Tombstoned { seq } => Applied::Tombstoned { seq },
+                        Deletion::Unchanged => Applied::Unchanged,
+                    }
+                }
+                // An upsert always carries a hash; the pairing above is what guarantees it.
+                (IngestOp::Upsert { .. }, None) => {
+                    return Err(StoreError::Corrupt {
+                        reason: "an upsert reached the store without a content hash".to_owned(),
+                    });
+                }
+            };
+            outcomes.push(outcome);
         }
         transaction.commit().await?;
         Ok(outcomes)
     }
 
     async fn delete(&self, key: &RecordKey) -> Result<Deletion, StoreError> {
-        let seq = sqlx::query_scalar!(
-            r#"
-            UPDATE record
-               SET payload = '{}'::jsonb,
-                   content_hash = $4,
-                   seq = nextval('record_seq'),
-                   ingested_at = now(),
-                   deleted_at = now()
-             WHERE source = $1
-               AND collection = $2
-               AND id = $3
-               AND deleted_at IS NULL
-            RETURNING seq
-            "#,
-            key.source.as_str(),
-            key.collection.as_str(),
-            key.id.as_str(),
-            ContentHash::EMPTY_DOCUMENT.as_bytes().as_slice(),
-        )
-        .fetch_optional(&self.pool)
-        .await?;
-
-        match seq {
-            Some(seq) => Ok(Deletion::Tombstoned { seq: to_seq(seq)? }),
-            None => Ok(Deletion::Unchanged),
-        }
+        write_delete(&self.pool, key).await
     }
 
     async fn list(
@@ -282,6 +283,48 @@ impl Store for PostgresStore {
         max.map(to_seq).transpose()
     }
 
+    async fn authenticate(&self, token: &TokenHash) -> Result<Option<SourceName>, StoreError> {
+        let source = sqlx::query_scalar!(
+            r#"
+            SELECT source
+              FROM ingest_token
+             WHERE token_hash = $1
+               AND revoked_at IS NULL
+            "#,
+            token.as_bytes().as_slice(),
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+
+        source
+            .map(|source| {
+                SourceName::new(source).map_err(|error| StoreError::Corrupt {
+                    reason: format!("stored source name is not usable: {error}"),
+                })
+            })
+            .transpose()
+    }
+
+    async fn store_token(
+        &self,
+        token: &TokenHash,
+        source: &SourceName,
+        label: &str,
+    ) -> Result<(), StoreError> {
+        sqlx::query!(
+            r#"
+            INSERT INTO ingest_token (token_hash, source, label)
+            VALUES ($1, $2, $3)
+            "#,
+            token.as_bytes().as_slice(),
+            source.as_str(),
+            label,
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     async fn get(&self, key: &RecordKey) -> Result<Option<StoredRecord>, StoreError> {
         let row = sqlx::query!(
             r#"
@@ -351,6 +394,43 @@ where
     match seq {
         Some(seq) => Ok(Upsert::Stored { seq: to_seq(seq)? }),
         None => Ok(Upsert::Unchanged),
+    }
+}
+
+/// The delete, written once so the single and the batch path cannot drift apart.
+///
+/// A tombstone keeps the record addressable but empties it: the payload becomes the empty document
+/// and the hash becomes that document's hash, which is what the schema's constraint requires. The
+/// `deleted_at IS NULL` clause makes deleting twice a no-op rather than a second feed entry.
+async fn write_delete<'e, E>(executor: E, key: &RecordKey) -> Result<Deletion, StoreError>
+where
+    E: PgExecutor<'e>,
+{
+    let seq = sqlx::query_scalar!(
+        r#"
+        UPDATE record
+           SET payload = '{}'::jsonb,
+               content_hash = $4,
+               seq = nextval('record_seq'),
+               ingested_at = now(),
+               deleted_at = now()
+         WHERE source = $1
+           AND collection = $2
+           AND id = $3
+           AND deleted_at IS NULL
+        RETURNING seq
+        "#,
+        key.source.as_str(),
+        key.collection.as_str(),
+        key.id.as_str(),
+        ContentHash::EMPTY_DOCUMENT.as_bytes().as_slice(),
+    )
+    .fetch_optional(executor)
+    .await?;
+
+    match seq {
+        Some(seq) => Ok(Deletion::Tombstoned { seq: to_seq(seq)? }),
+        None => Ok(Deletion::Unchanged),
     }
 }
 

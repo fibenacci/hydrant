@@ -29,14 +29,66 @@ impl StoredRecord {
     }
 }
 
-/// One record on its way in.
+/// One operation on its way in.
+///
+/// Payloads arriving here are already projected: the store never decides what is public.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IngestRecord {
-    /// The record's identifier, as assigned by the source system.
-    pub id: RecordId,
-    /// The already-projected payload. Projection happens before the store sees it — the store
-    /// never decides what is public.
-    pub payload: Value,
+pub enum IngestOp {
+    /// Write the record if its payload differs from what is stored.
+    Upsert {
+        /// The record's identifier, as assigned by the source system.
+        id: RecordId,
+        /// The already-projected payload.
+        payload: Value,
+    },
+    /// Turn the record into a tombstone.
+    Delete {
+        /// The record's identifier.
+        id: RecordId,
+    },
+}
+
+impl IngestOp {
+    /// The record this operation addresses.
+    #[must_use]
+    pub const fn id(&self) -> &RecordId {
+        match self {
+            Self::Upsert { id, .. } | Self::Delete { id } => id,
+        }
+    }
+}
+
+/// What one operation of a batch did.
+///
+/// A batch mixes writes and deletions, so its outcome needs a vocabulary that covers both. The
+/// single-record methods keep their own narrower types: an upsert cannot produce a tombstone, and a
+/// type that says so is worth more than one fewer enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Applied {
+    /// A payload was written, at a new feed position.
+    Stored {
+        /// The record's new position in the change feed.
+        seq: Seq,
+    },
+    /// A live record became a tombstone, at a new feed position.
+    Tombstoned {
+        /// The tombstone's position in the change feed.
+        seq: Seq,
+    },
+    /// Nothing was written: the payload already hashed to the same value, or there was nothing to
+    /// delete. No feed position was consumed.
+    Unchanged,
+}
+
+impl Applied {
+    /// The new feed position, if anything was written.
+    #[must_use]
+    pub const fn seq(self) -> Option<Seq> {
+        match self {
+            Self::Stored { seq } | Self::Tombstoned { seq } => Some(seq),
+            Self::Unchanged => None,
+        }
+    }
 }
 
 /// How many records a listing may return.
@@ -79,7 +131,7 @@ impl Default for PageLimit {
     }
 }
 
-/// One page of a listing.
+/// One page of a listing or of the change feed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Page {
     /// The records in feed order.

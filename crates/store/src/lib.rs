@@ -15,10 +15,13 @@ pub mod error;
 pub mod postgres;
 pub mod record;
 pub mod store;
+pub mod token;
 
 pub use error::StoreError;
 pub use postgres::PostgresStore;
 pub use record::{
-    Deletion, Digest, DigestPage, IngestRecord, Manifest, Page, PageLimit, StoredRecord, Upsert,
+    Applied, Deletion, Digest, DigestPage, IngestOp, Manifest, Page, PageLimit, StoredRecord,
+    Upsert,
 };
 pub use store::Store;
+pub use token::{Token, TokenHash};
