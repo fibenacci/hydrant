@@ -83,7 +83,12 @@ async fn serve(config: Config) -> Result<(), Box<dyn Error>> {
     let schemas = schemas::load(&config.schemas_dir)?;
     tracing::info!(collections = schemas.len(), "collection definitions loaded");
 
-    let store = PostgresStore::connect(&config.database_url, config.max_connections).await?;
+    let store = PostgresStore::connect(
+        &config.database_url,
+        config.max_connections,
+        Duration::from_secs(config.statement_timeout),
+    )
+    .await?;
     if config.migrate_on_start {
         store.migrate().await?;
         tracing::info!("migrations are up to date");
@@ -104,7 +109,12 @@ async fn serve(config: Config) -> Result<(), Box<dyn Error>> {
 /// the database is its HMAC under the application secret.
 async fn mint(config: &Config, source: &str, label: &str) -> Result<(), Box<dyn Error>> {
     let source: SourceName = source.parse()?;
-    let store = PostgresStore::connect(&config.database_url, 1).await?;
+    let store = PostgresStore::connect(
+        &config.database_url,
+        1,
+        Duration::from_secs(config.statement_timeout),
+    )
+    .await?;
     if config.migrate_on_start {
         store.migrate().await?;
     }

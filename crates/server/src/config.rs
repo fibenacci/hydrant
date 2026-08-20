@@ -37,6 +37,12 @@ pub struct Config {
     pub migrate_on_start: bool,
     /// Hard limit on how long a request may take, in seconds. A public endpoint needs one.
     pub request_timeout: u64,
+    /// Hard limit on how long a single database statement may take, in seconds.
+    ///
+    /// Bounds the worst case of a filter the planner cannot serve from an index. Lower than the
+    /// request timeout on purpose: the query should give up before the request does, so the response
+    /// says what happened.
+    pub statement_timeout: u64,
     /// `tracing` filter, e.g. `info` or `hydrant_api=debug,info`.
     pub log: String,
 }
@@ -51,6 +57,7 @@ impl Default for Config {
             schemas_dir: PathBuf::from("schemas"),
             migrate_on_start: true,
             request_timeout: 10,
+            statement_timeout: 5,
             log: "info".to_owned(),
         }
     }
