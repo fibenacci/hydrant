@@ -63,6 +63,9 @@ tracing = "0.1"
 tower = "0.5"
 http-body-util = "0.1"
 form_urlencoded = "1"
+metrics = "0.24"
+metrics-exporter-prometheus = "0.18"
+metrics-util = "0.20"
 # serde_yaml is archived and serde_yml unmaintained; serde_yaml_ng is the fork that
 # is still getting releases.
 serde_yaml_ng = "0.10"

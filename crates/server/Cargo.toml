@@ -23,6 +23,8 @@ figment = { workspace = true }
 hydrant-api = { workspace = true }
 hydrant-core = { workspace = true }
 hydrant-store = { workspace = true }
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_yaml_ng = { workspace = true }
 thiserror = { workspace = true }
