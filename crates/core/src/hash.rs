@@ -144,6 +144,41 @@ pub fn content_hash(value: &Value) -> Result<ContentHash, CanonicalError> {
     Ok(ContentHash::from_bytes(bytes))
 }
 
+/// The checksum of a whole collection: SHA-256 over the canonical form of its `[id, hash]` pairs,
+/// sorted by id.
+///
+/// This is the cheap comparison a sender uses to detect drift, so it is as much a wire contract as
+/// [`content_hash`] is. Two consequences follow from that:
+///
+/// - The sort happens here, not at the call site. A caller that passed its rows in database order
+///   would compute a checksum nobody else can reproduce.
+/// - The pairs go through the same RFC 8785 canonicalisation as a payload does. Concatenating ids
+///   and hashes with a separator would be a second, hand-rolled canonical form — and the separator
+///   would be part of the contract forever.
+///
+/// A checksum on its own can only say *that* a collection drifted. Which record, and which field,
+/// is what per-record digests answer; that is why they exist from the start rather than after the
+/// first incident.
+///
+/// # Errors
+///
+/// Returns [`CanonicalError`] if the pairs cannot be canonicalised, which cannot happen for strings.
+pub fn collection_checksum<'a, I>(entries: I) -> Result<ContentHash, CanonicalError>
+where
+    I: IntoIterator<Item = (&'a str, ContentHash)>,
+{
+    let mut pairs: Vec<(&str, ContentHash)> = entries.into_iter().collect();
+    pairs.sort_unstable_by(|left, right| left.0.cmp(right.0));
+
+    let array = Value::Array(
+        pairs
+            .into_iter()
+            .map(|(id, hash)| Value::Array(vec![Value::from(id), Value::from(hash.to_hex())]))
+            .collect(),
+    );
+    content_hash(&array)
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -210,6 +245,46 @@ mod tests {
             content_hash(&json!({})).expect("hash"),
             ContentHash::EMPTY_DOCUMENT
         );
+    }
+
+    #[test]
+    fn a_collection_checksum_ignores_the_order_rows_arrive_in() {
+        let a = content_hash(&json!({ "sku": "A" })).expect("hash");
+        let b = content_hash(&json!({ "sku": "B" })).expect("hash");
+
+        let forward = collection_checksum([("SW1", a), ("SW2", b)]).expect("checksum");
+        let reverse = collection_checksum([("SW2", b), ("SW1", a)]).expect("checksum");
+        assert_eq!(forward, reverse);
+    }
+
+    #[test]
+    fn a_collection_checksum_notices_a_single_changed_record() {
+        let a = content_hash(&json!({ "sku": "A" })).expect("hash");
+        let b = content_hash(&json!({ "sku": "B" })).expect("hash");
+        let changed = content_hash(&json!({ "sku": "B2" })).expect("hash");
+
+        assert_ne!(
+            collection_checksum([("SW1", a), ("SW2", b)]).expect("checksum"),
+            collection_checksum([("SW1", a), ("SW2", changed)]).expect("checksum")
+        );
+    }
+
+    #[test]
+    fn a_collection_checksum_notices_a_moved_id() {
+        // The same set of hashes under different ids is a different collection, so pairing matters
+        // - a checksum over hashes alone would call these equal.
+        let a = content_hash(&json!({ "sku": "A" })).expect("hash");
+        let b = content_hash(&json!({ "sku": "B" })).expect("hash");
+        assert_ne!(
+            collection_checksum([("SW1", a), ("SW2", b)]).expect("checksum"),
+            collection_checksum([("SW1", b), ("SW2", a)]).expect("checksum")
+        );
+    }
+
+    #[test]
+    fn an_empty_collection_has_a_stable_checksum() {
+        let empty = collection_checksum(std::iter::empty()).expect("checksum");
+        assert_eq!(empty, content_hash(&json!([])).expect("hash"));
     }
 
     #[test]

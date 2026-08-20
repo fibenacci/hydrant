@@ -23,7 +23,7 @@ pub mod ident;
 pub mod projection;
 pub mod schema;
 
-pub use hash::{ContentHash, canonicalize, content_hash};
+pub use hash::{ContentHash, canonicalize, collection_checksum, content_hash};
 pub use ident::{CollectionName, RecordId, RecordKey, Seq, SourceName};
 pub use projection::{DropReason, DroppedField, Projection, ProjectionError, project};
 pub use schema::{
