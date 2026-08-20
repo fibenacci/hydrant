@@ -50,8 +50,15 @@ curl -si localhost:8080/v1/sap-stage/catalog.product/SW1
 - Collection definitions are read from `schemas/` at startup. A collection that no schema
   declares cannot be read and cannot be written to.
 
-Not there yet: declared filters on the read path (they need the indexes a schema declares),
-rate limits, metrics, the generated OpenAPI document, and the CLI.
+```bash
+curl -s "localhost:8080/v1/sap-stage/catalog.product?filter[sku]=SW-1&limit=50"
+```
+
+Only fields a schema declares as filters may be filtered on, only for equality, and a value of the
+wrong type is a bad request rather than an empty page.
+
+Not there yet: sorting by a payload field, rate limits, metrics, the generated OpenAPI document,
+and the CLI.
 
 What the service guarantees is in [CONTRIBUTING.md](CONTRIBUTING.md#invariants); how it is
 built is in the [Makefile](Makefile).

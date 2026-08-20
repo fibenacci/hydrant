@@ -107,7 +107,12 @@ curl -s localhost:8080/v1/sap-stage/catalog.product/SW1
 ```
 
 The response to the push names every field the schema did not release, and the read shows that
-those fields were never stored. Every setting comes from the environment — see `.env.example`;
+those fields were never stored. Listings can be narrowed by any field the schema declares as a
+filter:
+
+```bash
+curl -s "localhost:8080/v1/sap-stage/catalog.product?filter[sku]=SW-1"
+``` Every setting comes from the environment — see `.env.example`;
 there is no config file, because a file would be a second place to look when a setting is wrong.
 
 ## Database and query metadata
@@ -125,6 +130,10 @@ make db-up
 make migrate
 make sqlx-prepare     # rewrites .sqlx
 ```
+
+A migration that has been applied is immutable: sqlx records its checksum and refuses to start on a
+mismatch. Editing one - even a comment - breaks every environment that already ran it, so change
+means adding the next file, not touching an old one.
 
 Commit the `.sqlx` change together with the query. CI runs `make sqlx-check` and fails if the two
 have drifted. `make ci` runs that check too when `sqlx-cli` is installed, and says so when it is not
