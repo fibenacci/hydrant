@@ -43,11 +43,13 @@ curl -si localhost:8080/v1/sap-stage/catalog.product/SW1
   drops everything a collection schema does not name.
 - `crates/store` — records in PostgreSQL, idempotent over the content hash, deletes as
   tombstones, cursor pagination on the change-feed position.
-- `crates/api` + `crates/server` — the public read API: collection listings, single records,
-  `ETag` and `If-None-Match`, `Cache-Control` on everything cacheable.
+- `crates/api` + `crates/server` — the public read API: collection listings, single records, the
+  change feed (`?since=`), collection manifests, `ETag` and `If-None-Match`, `Cache-Control` on
+  everything cacheable.
 
-Not there yet: the ingest endpoint, the change feed, manifests and digests, declared filters,
-schema loading from YAML, and the generated OpenAPI document.
+Not there yet: the ingest endpoint, the per-record digest listing (the store computes it, the
+authenticated surface it belongs on does not exist yet), declared filters, schema loading from
+YAML, and the generated OpenAPI document.
 
 What the service guarantees is in [CONTRIBUTING.md](CONTRIBUTING.md#invariants); how it is
 built is in the [Makefile](Makefile).
