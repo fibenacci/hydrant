@@ -15,6 +15,7 @@
 pub mod cache;
 pub mod error;
 pub mod ingest;
+pub mod metrics;
 pub mod public;
 pub mod query;
 pub mod response;

@@ -259,6 +259,7 @@ pub async fn ingest<S: Store>(
     }
 
     let outcomes = state.store.apply(&source, &collection, &ops).await?;
+    crate::metrics::record_outcomes(&collection, &outcomes);
     let results = ops
         .iter()
         .zip(outcomes)
@@ -391,9 +392,9 @@ fn prepare(
                 message: error.to_string(),
             })?;
             if !projected.dropped.is_empty() {
-                // Visibility is the requirement, not the transport: a source system that starts
-                // sending a new field has to show up somewhere. The labelled counter arrives with
-                // the metrics work; until then this is the record of it.
+                // Both, on purpose: the counter is what a dashboard notices, the log line is what
+                // names the record once someone is looking.
+                crate::metrics::record_dropped(schema.collection(), &projected.dropped);
                 tracing::info!(
                     collection = %schema.collection(),
                     record = %id,
