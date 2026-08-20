@@ -89,6 +89,34 @@ make db-up COMPOSE="podman compose"
 The service itself is not runnable yet — the binary arrives with `crates/server`. Until then
 `make db-up` is the whole local environment.
 
+## Database and query metadata
+
+`crates/store` is tested against a real PostgreSQL rather than a mock. Idempotency lives in an
+`ON CONFLICT ... WHERE` clause and the tombstone rule lives in a check constraint; neither can be
+verified anywhere else. So `make db-up` is a prerequisite for `make test`.
+
+Queries are checked at compile time against the metadata in `.sqlx`, which is committed. That is
+what lets every CI job except the test job build without a database, and it makes a query change
+visible in review rather than hidden inside a string. When you add or change a query:
+
+```bash
+make db-up
+make migrate
+make sqlx-prepare     # rewrites .sqlx
+```
+
+Commit the `.sqlx` change together with the query. CI runs `make sqlx-check` and fails if the two
+have drifted. `make ci` runs that check too when `sqlx-cli` is installed, and says so when it is not
+— installing it is optional:
+
+```bash
+cargo install sqlx-cli --version 0.8.6 --no-default-features --features postgres,rustls
+```
+
+The version is pinned deliberately: a newer `sqlx-cli` writes metadata the pinned `sqlx` library
+cannot read. `sqlx` itself is held at 0.8 because 0.9 requires Rust 1.94, well beyond the 1.88 MSRV
+declared in `Cargo.toml`.
+
 ## Local checks
 
 Reproduce the CI pipeline before pushing:

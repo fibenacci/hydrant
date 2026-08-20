@@ -34,7 +34,8 @@ Consequences, all deliberate:
 
 Early implementation. `crates/core` carries the parts the whole design rests on — RFC 8785
 canonicalisation, content hashing, and the projection engine that drops everything a
-collection schema does not name. There is no store and no HTTP surface yet, so nothing is
+collection schema does not name. `crates/store` persists records in PostgreSQL, idempotently
+over the content hash, with deletes as tombstones. There is no HTTP surface yet, so nothing is
 servable.
 
 What the service guarantees is in [CONTRIBUTING.md](CONTRIBUTING.md#invariants); how it is
