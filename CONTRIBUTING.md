@@ -147,6 +147,17 @@ The version is pinned deliberately: a newer `sqlx-cli` writes metadata the pinne
 cannot read. `sqlx` itself is held at 0.8 because 0.9 requires Rust 1.94, well beyond the 1.88 MSRV
 declared in `Cargo.toml`.
 
+## Metrics
+
+The Prometheus exporter listens on `HYDRANT_METRICS_LISTEN`, separate from the data surface. Adding a
+metric means thinking about label cardinality first: a label value has to come from a closed set. A
+collection name and a schema's field names are closed; a record id, a request path and an array index
+are not. Drop paths are normalised (`images[3]` becomes `images[]`) for exactly that reason, and the
+HTTP labels use the matched route pattern rather than the path.
+
+`ingest_dropped_field_total` is not an optional metric. Deny-by-default only works if a source
+system that starts sending a new field becomes visible, and that counter is the visibility.
+
 ## Local checks
 
 Reproduce the CI pipeline before pushing:

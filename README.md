@@ -57,8 +57,18 @@ curl -s "localhost:8080/v1/sap-stage/catalog.product?filter[sku]=SW-1&limit=50"
 Only fields a schema declares as filters may be filtered on, only for equality, and a value of the
 wrong type is a bad request rather than an empty page.
 
-Not there yet: sorting by a payload field, rate limits, metrics, the generated OpenAPI document,
-and the CLI.
+Metrics are exported for Prometheus on a separate listener — `127.0.0.1:9090` by default, because
+they describe the deployment rather than the data:
+
+```
+ingest_dropped_field_total{collection,field,reason}   what a source system sends that is not released
+ingest_records_total{collection,outcome}              stored / unchanged / tombstoned
+http_requests_total{method,route,status}
+http_request_duration_seconds{method,route}
+```
+
+Not there yet: sorting by a payload field, rate limits, the generated OpenAPI document, and the
+CLI.
 
 What the service guarantees is in [CONTRIBUTING.md](CONTRIBUTING.md#invariants); how it is
 built is in the [Makefile](Makefile).
