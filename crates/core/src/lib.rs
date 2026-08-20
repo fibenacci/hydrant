@@ -18,11 +18,13 @@
 //! The service knows nothing about the source domain: payloads are documents, references between
 //! them are opaque strings, and resolving those is the consumer's job.
 
+pub mod filter;
 pub mod hash;
 pub mod ident;
 pub mod projection;
 pub mod schema;
 
+pub use filter::{Filter, FilterError};
 pub use hash::{ContentHash, canonicalize, collection_checksum, content_hash};
 pub use ident::{CollectionName, RecordId, RecordKey, Seq, SourceName};
 pub use projection::{DropReason, DroppedField, Projection, ProjectionError, project};
