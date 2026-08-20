@@ -25,6 +25,14 @@ pub enum ApiError {
     /// One variant for "no header", "malformed header" and "unknown token" alike: telling a caller
     /// which of the three it was tells it how to get closer.
     Unauthorized,
+    /// A record's payload is larger than this deployment will store.
+    ///
+    /// Separate from a bad request because it is not malformed - it is too big, which is an
+    /// operational limit rather than a mistake in the document.
+    PayloadTooLarge {
+        /// What was wrong, with the sizes in it.
+        message: String,
+    },
     /// No such collection: the name is not declared in any schema.
     ///
     /// Distinct from a missing record on purpose. "This collection does not exist" and "this record
@@ -83,6 +91,9 @@ impl IntoResponse for ApiError {
         let (status, code, message) = match self {
             Self::Unauthorized => unreachable!("handled above"),
             Self::BadRequest { code, message } => (StatusCode::BAD_REQUEST, code, message),
+            Self::PayloadTooLarge { message } => {
+                (StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large", message)
+            }
             Self::UnknownCollection => (
                 StatusCode::NOT_FOUND,
                 "unknown_collection",

@@ -15,7 +15,7 @@ use http_body_util::BodyExt;
 use hydrant_api::{ApiState, RateLimits, router};
 use hydrant_core::schema::CollectionSchema;
 use hydrant_core::{CollectionName, RecordId, RecordKey, SchemaSet, SourceName};
-use hydrant_store::{PostgresStore, Store};
+use hydrant_store::{ByteBudget, PostgresStore, Store};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use std::net::SocketAddr;
@@ -731,4 +731,32 @@ async fn the_change_feed_takes_no_filter(pool: PgPool) {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["error"]["code"], "invalid_query");
+}
+
+#[sqlx::test(migrations = "../store/migrations")]
+async fn a_page_stops_at_the_byte_budget(pool: PgPool) {
+    let store = PostgresStore::from_pool(pool.clone());
+    for id in ["SW1", "SW2", "SW3"] {
+        store
+            .upsert(&key(id), &json!({ "sku": "x".repeat(1000) }))
+            .await
+            .expect("stored");
+    }
+
+    // A page is bounded in bytes as well as in records: a thousand large records would otherwise be
+    // a response nobody asked for the size of.
+    let app = router(
+        ApiState::new(PostgresStore::from_pool(pool), schemas())
+            .with_response_bytes(ByteBudget::clamp(1500)),
+        generous(),
+    )
+    .expect("usable limits");
+
+    let (status, _, body) = get(&app, "/v1/sap-stage/catalog.product?limit=100", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["records"].as_array().expect("records").len(), 1);
+    assert!(
+        body["next_cursor"].as_u64().is_some(),
+        "a page cut short by the budget still offers a cursor: {body}"
+    );
 }

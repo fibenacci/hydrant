@@ -23,6 +23,7 @@ pub mod response;
 pub mod state;
 
 use axum::Router;
+use axum::extract::DefaultBodyLimit;
 use axum::routing::{delete, get, post};
 use hydrant_store::Store;
 use tower_governor::key_extractor::{PeerIpKeyExtractor, SmartIpKeyExtractor};
@@ -65,6 +66,9 @@ pub fn ingest_router<S>(state: IngestState<S>) -> Router
 where
     S: Store + 'static,
 {
+    // The body limit belongs on this router only: a read request has no body worth bounding, and a
+    // global limit would be a number nobody could explain.
+    let max_body_bytes = state.max_body_bytes();
     Router::new()
         .route("/v1/ingest/{collection}", post(ingest::ingest::<S>))
         .route("/v1/ingest/{collection}/digests", get(ingest::digests::<S>))
@@ -72,5 +76,6 @@ where
             "/v1/ingest/{collection}/{id}",
             delete(ingest::delete_record::<S>),
         )
+        .layer(DefaultBodyLimit::max(max_body_bytes))
         .with_state(state)
 }

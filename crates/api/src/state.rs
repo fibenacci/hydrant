@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use hydrant_core::SchemaSet;
+use hydrant_store::ByteBudget;
 
 /// Shared state behind the routes.
 ///
@@ -15,6 +16,11 @@ pub struct ApiState<S> {
     pub store: Arc<S>,
     /// Every collection the service serves.
     pub schemas: Arc<SchemaSet>,
+    /// How many payload bytes one page may return.
+    ///
+    /// The record count alone does not bound a response: a full page of large records is large. A
+    /// page that runs out of budget ends early and offers a cursor, so nothing becomes unreachable.
+    pub response_bytes: ByteBudget,
 }
 
 impl<S> ApiState<S> {
@@ -24,7 +30,15 @@ impl<S> ApiState<S> {
         Self {
             store: Arc::new(store),
             schemas: Arc::new(schemas),
+            response_bytes: ByteBudget::default(),
         }
+    }
+
+    /// Sets how many payload bytes a page may return.
+    #[must_use]
+    pub const fn with_response_bytes(mut self, bytes: ByteBudget) -> Self {
+        self.response_bytes = bytes;
+        self
     }
 }
 
@@ -35,6 +49,7 @@ impl<S> Clone for ApiState<S> {
         Self {
             store: Arc::clone(&self.store),
             schemas: Arc::clone(&self.schemas),
+            response_bytes: self.response_bytes,
         }
     }
 }

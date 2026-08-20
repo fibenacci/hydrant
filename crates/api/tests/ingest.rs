@@ -52,14 +52,22 @@ fn schemas() -> SchemaSet {
 
 /// A router plus a credential that is already in the database.
 async fn app(pool: PgPool) -> (Router, PostgresStore) {
+    app_with_limits(pool, None).await
+}
+
+/// The same, with a per-record payload limit.
+async fn app_with_limits(pool: PgPool, max_payload: Option<usize>) -> (Router, PostgresStore) {
     let store = PostgresStore::from_pool(pool);
     let hash = Token::from_presented(TOKEN).hash(SECRET).expect("hash");
     store
         .store_token(&hash, &source(), "test sender")
         .await
         .expect("token stored");
-    let router = ingest_router(IngestState::new(store.clone(), schemas(), SECRET));
-    (router, store)
+    let mut state = IngestState::new(store.clone(), schemas(), SECRET);
+    if let Some(max_payload) = max_payload {
+        state = state.with_limits(max_payload, 4 * 1024 * 1024);
+    }
+    (ingest_router(state), store)
 }
 
 async fn send(
@@ -444,4 +452,83 @@ async fn the_digest_listing_needs_a_credential_too(pool: PgPool) {
     )
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[sqlx::test(migrations = "../store/migrations")]
+async fn a_record_larger_than_the_limit_is_refused(pool: PgPool) {
+    let (app, store) = app_with_limits(pool, Some(200)).await;
+    let (status, body, _) = send(
+        &app,
+        Method::POST,
+        "/v1/ingest/catalog.product",
+        Some(TOKEN),
+        Some(json!([{ "op": "upsert", "id": "SW1", "payload": { "sku": "x".repeat(500) } }])),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(body["error"]["code"], "payload_too_large");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .expect("message")
+            .contains("SW1"),
+        "the refusal names the record: {body}"
+    );
+    assert!(
+        store.get(&key("SW1")).await.expect("query").is_none(),
+        "and nothing was stored"
+    );
+}
+
+#[sqlx::test(migrations = "../store/migrations")]
+async fn size_is_measured_on_what_would_be_stored(pool: PgPool) {
+    // The payload is far over the limit as sent, but almost all of it is fields the schema does not
+    // release. What counts is what would be stored and served, so this is accepted.
+    let (app, store) = app_with_limits(pool, Some(200)).await;
+    let (status, body) = post(
+        &app,
+        json!([{
+            "op": "upsert",
+            "id": "SW1",
+            "payload": { "sku": "SW-1", "internal_note": "y".repeat(2000) }
+        }]),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["results"][0]["outcome"], "stored");
+    assert_eq!(
+        store
+            .get(&key("SW1"))
+            .await
+            .expect("query")
+            .expect("record")
+            .payload,
+        json!({ "sku": "SW-1" })
+    );
+}
+
+#[sqlx::test(migrations = "../store/migrations")]
+async fn a_whole_batch_is_refused_for_one_oversized_record(pool: PgPool) {
+    // The batch is one transaction, so a record that cannot be stored refuses the batch rather than
+    // leaving the sender to work out which half landed.
+    let (app, store) = app_with_limits(pool, Some(200)).await;
+    let (status, _, _) = send(
+        &app,
+        Method::POST,
+        "/v1/ingest/catalog.product",
+        Some(TOKEN),
+        Some(json!([
+            { "op": "upsert", "id": "SW1", "payload": { "sku": "small" } },
+            { "op": "upsert", "id": "SW2", "payload": { "sku": "x".repeat(500) } }
+        ])),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    assert!(
+        store.get(&key("SW1")).await.expect("query").is_none(),
+        "nothing was written"
+    );
 }

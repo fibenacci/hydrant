@@ -16,7 +16,7 @@ use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use hydrant_core::schema::CollectionSchema;
 use hydrant_core::{CollectionName, Filter, RecordId, RecordKey, Seq, SourceName, content_hash};
-use hydrant_store::{PageLimit, Store};
+use hydrant_store::{PageBudget, PageLimit, Store};
 use serde::{Deserialize, Serialize};
 
 use crate::cache::is_fresh;
@@ -79,6 +79,10 @@ pub async fn list_collection<S: Store>(
     let limit = params
         .limit
         .map_or_else(PageLimit::default, PageLimit::clamp);
+    let budget = PageBudget {
+        records: limit,
+        bytes: state.response_bytes,
+    };
     let cursor = params.cursor.map(Seq::new);
 
     let max_seq = state.store.max_seq(&source, &collection).await?;
@@ -89,7 +93,7 @@ pub async fn list_collection<S: Store>(
 
     let page = state
         .store
-        .list(&source, &collection, &filter, cursor, limit)
+        .list(&source, &collection, &filter, cursor, budget)
         .await?;
     let body = PageBody::new(page, max_seq.map_or(0, Seq::get));
     Ok((cache_headers(max_age, &etag), Json(body)).into_response())
@@ -161,6 +165,10 @@ pub async fn changes<S: Store>(
     let limit = query
         .limit
         .map_or_else(PageLimit::default, PageLimit::clamp);
+    let budget = PageBudget {
+        records: limit,
+        bytes: state.response_bytes,
+    };
     let since = query.since.map(Seq::new);
 
     let max_seq = state.store.max_seq(&source, &collection).await?;
@@ -171,7 +179,7 @@ pub async fn changes<S: Store>(
 
     let page = state
         .store
-        .changes(&source, &collection, since, limit)
+        .changes(&source, &collection, since, budget)
         .await?;
     let body = ChangesBody::new(page, max_seq.map_or(0, Seq::get));
     Ok((cache_headers(max_age, &etag), Json(body)).into_response())

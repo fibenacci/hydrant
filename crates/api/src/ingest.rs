@@ -14,12 +14,13 @@ use std::sync::Arc;
 use axum::Json;
 use axum::extract::rejection::{JsonRejection, QueryRejection};
 use axum::extract::{FromRequestParts, Path, Query, State};
+use axum::http::StatusCode;
 use axum::http::header::{AUTHORIZATION, WWW_AUTHENTICATE};
 use axum::http::request::Parts;
 use axum::response::{IntoResponse, Response};
 use hydrant_core::schema::CollectionSchema;
 use hydrant_core::{
-    CollectionName, DropReason, RecordId, RecordKey, SchemaSet, SourceName, project,
+    CollectionName, DropReason, RecordId, RecordKey, SchemaSet, SourceName, canonicalize, project,
 };
 use hydrant_store::token::Token;
 use hydrant_store::{Applied, Deletion, IngestOp, PageLimit, Store};
@@ -27,6 +28,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::error::ApiError;
+
+/// The largest payload one record may carry, measured on its canonical form.
+///
+/// Measured there rather than on the request bytes so two senders agree on whether a record fits:
+/// the canonical form is the same for both, and it is the form the content hash covers.
+pub const MAX_PAYLOAD_BYTES: usize = 64 * 1024;
+
+/// The largest request body the ingest surface accepts.
+pub const MAX_BODY_BYTES: usize = 4 * 1024 * 1024;
 
 /// The largest batch one request may carry.
 ///
@@ -43,6 +53,10 @@ pub struct IngestState<S> {
     pub schemas: Arc<SchemaSet>,
     /// The application secret ingest tokens are hashed with. Never leaves this crate.
     secret: Arc<Vec<u8>>,
+    /// The largest canonical payload a single record may carry.
+    max_payload_bytes: usize,
+    /// The largest request body accepted.
+    max_body_bytes: usize,
 }
 
 impl<S> IngestState<S> {
@@ -53,7 +67,23 @@ impl<S> IngestState<S> {
             store: Arc::new(store),
             schemas: Arc::new(schemas),
             secret: Arc::new(secret.into()),
+            max_payload_bytes: MAX_PAYLOAD_BYTES,
+            max_body_bytes: MAX_BODY_BYTES,
         }
+    }
+
+    /// Sets the per-record and per-request size limits.
+    #[must_use]
+    pub const fn with_limits(mut self, max_payload_bytes: usize, max_body_bytes: usize) -> Self {
+        self.max_payload_bytes = max_payload_bytes;
+        self.max_body_bytes = max_body_bytes;
+        self
+    }
+
+    /// The largest request body this surface accepts.
+    #[must_use]
+    pub const fn max_body_bytes(&self) -> usize {
+        self.max_body_bytes
     }
 }
 
@@ -63,6 +93,8 @@ impl<S> Clone for IngestState<S> {
             store: Arc::clone(&self.store),
             schemas: Arc::clone(&self.schemas),
             secret: Arc::clone(&self.secret),
+            max_payload_bytes: self.max_payload_bytes,
+            max_body_bytes: self.max_body_bytes,
         }
     }
 }
@@ -239,9 +271,19 @@ pub async fn ingest<S: Store>(
         .get(&collection)
         .ok_or(ApiError::UnknownCollection)?;
 
-    let Json(envelopes) = body.map_err(|rejection| ApiError::BadRequest {
-        code: "invalid_body",
-        message: rejection.body_text(),
+    let Json(envelopes) = body.map_err(|rejection| {
+        // A body over the limit is not malformed, it is too big, and answering 400 would send the
+        // sender looking for a syntax error it will not find.
+        if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
+            ApiError::PayloadTooLarge {
+                message: rejection.body_text(),
+            }
+        } else {
+            ApiError::BadRequest {
+                code: "invalid_body",
+                message: rejection.body_text(),
+            }
+        }
     })?;
     if envelopes.len() > MAX_BATCH {
         return Err(ApiError::BadRequest {
@@ -253,7 +295,7 @@ pub async fn ingest<S: Store>(
     let mut ops = Vec::with_capacity(envelopes.len());
     let mut dropped_per_op = Vec::with_capacity(envelopes.len());
     for envelope in envelopes {
-        let (op, dropped) = prepare(schema, envelope)?;
+        let (op, dropped) = prepare(schema, envelope, state.max_payload_bytes)?;
         ops.push(op);
         dropped_per_op.push(dropped);
     }
@@ -366,6 +408,7 @@ pub async fn digests<S: Store>(
 fn prepare(
     schema: &CollectionSchema,
     envelope: Envelope,
+    max_payload_bytes: usize,
 ) -> Result<(IngestOp, Vec<DroppedBody>), ApiError> {
     match envelope.op {
         Operation::Upsert => {
@@ -401,6 +444,24 @@ fn prepare(
                     dropped = projected.dropped.len(),
                     "fields dropped at ingest"
                 );
+            }
+
+            // Measured after projection, not before: what counts is what would be stored and
+            // served, and a sender that pads a record with fields nobody released should not be
+            // refused for them. The canonical form is the unit, so two senders agree on whether a
+            // record fits.
+            let size = canonicalize(&projected.payload)
+                .map_err(|error| ApiError::BadRequest {
+                    code: "invalid_payload",
+                    message: error.to_string(),
+                })?
+                .len();
+            if size > max_payload_bytes {
+                return Err(ApiError::PayloadTooLarge {
+                    message: format!(
+                        "record `{id}` projects to {size} bytes; the limit is {max_payload_bytes}"
+                    ),
+                });
             }
 
             let dropped = projected
