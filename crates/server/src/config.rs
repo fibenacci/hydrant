@@ -16,6 +16,11 @@ use serde::{Deserialize, Serialize};
 pub struct Config {
     /// PostgreSQL connection string. `DATABASE_URL` or `HYDRANT_DATABASE_URL`.
     pub database_url: String,
+    /// Secret that ingest tokens are hashed with, `HYDRANT_TOKEN_SECRET`.
+    ///
+    /// Not in the database on purpose: a dump without it yields no working credentials. Changing it
+    /// invalidates every existing token, which is also how a suspected leak is handled.
+    pub token_secret: String,
     /// Address to listen on. Defaults to all interfaces on 8080, which is what a container wants.
     pub listen: SocketAddr,
     /// Upper bound on pooled database connections.
@@ -40,6 +45,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             database_url: String::new(),
+            token_secret: String::new(),
             listen: SocketAddr::from(([0, 0, 0, 0], 8080)),
             max_connections: 10,
             schemas_dir: PathBuf::from("schemas"),
@@ -62,6 +68,9 @@ pub enum ConfigError {
     /// No database connection string was given.
     #[error("no database connection string: set DATABASE_URL or HYDRANT_DATABASE_URL")]
     NoDatabaseUrl,
+    /// No secret for hashing ingest tokens was given.
+    #[error("no token secret: set HYDRANT_TOKEN_SECRET (32 or more characters)")]
+    NoTokenSecret,
 }
 
 impl From<figment::Error> for ConfigError {
@@ -94,6 +103,11 @@ impl Config {
         if config.database_url.trim().is_empty() {
             return Err(ConfigError::NoDatabaseUrl);
         }
+        // A short secret is worse than an obvious error at startup: it would key every credential
+        // in the system.
+        if config.token_secret.trim().len() < 32 {
+            return Err(ConfigError::NoTokenSecret);
+        }
         Ok(config)
     }
 }
@@ -115,10 +129,23 @@ mod tests {
         Jail::expect_with(|jail| {
             jail.clear_env();
             jail.set_env("HYDRANT_DATABASE_URL", "postgres://localhost/hydrant");
+            jail.set_env("HYDRANT_TOKEN_SECRET", "x".repeat(32));
             let config = Config::from_provider(Env::prefixed("HYDRANT_")).expect("config");
             assert_eq!(config.listen.port(), 8080);
             assert_eq!(config.schemas_dir, PathBuf::from("schemas"));
             assert!(config.migrate_on_start);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn a_short_token_secret_is_refused() {
+        Jail::expect_with(|jail| {
+            jail.clear_env();
+            jail.set_env("HYDRANT_DATABASE_URL", "postgres://localhost/hydrant");
+            jail.set_env("HYDRANT_TOKEN_SECRET", "too short");
+            let error = Config::from_provider(Env::prefixed("HYDRANT_")).expect_err("too short");
+            assert!(matches!(error, ConfigError::NoTokenSecret));
             Ok(())
         });
     }
@@ -140,6 +167,7 @@ mod tests {
         Jail::expect_with(|jail| {
             jail.clear_env();
             jail.set_env("DATABASE_URL", "postgres://localhost/from-plain");
+            jail.set_env("HYDRANT_TOKEN_SECRET", "x".repeat(32));
             let config = Config::from_provider(Env::prefixed("HYDRANT_")).expect("config");
             assert_eq!(config.database_url, "postgres://localhost/from-plain");
             Ok(())
@@ -152,6 +180,7 @@ mod tests {
             jail.clear_env();
             jail.set_env("DATABASE_URL", "postgres://localhost/plain");
             jail.set_env("HYDRANT_DATABASE_URL", "postgres://localhost/prefixed");
+            jail.set_env("HYDRANT_TOKEN_SECRET", "x".repeat(32));
             jail.set_env("HYDRANT_LISTEN", "127.0.0.1:9000");
             let config = Config::from_provider(Env::prefixed("HYDRANT_")).expect("config");
             assert_eq!(config.database_url, "postgres://localhost/prefixed");
