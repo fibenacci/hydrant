@@ -23,12 +23,16 @@ use axum::routing::get;
 use hydrant_store::Store;
 
 pub use error::ApiError;
-pub use response::{PageBody, RecordBody};
+pub use response::{ChangeBody, ChangesBody, ManifestBody, PageBody, RecordBody};
 pub use state::ApiState;
 
 /// The public read router.
 ///
 /// `/health` is liveness for an orchestrator, not part of the data surface.
+///
+/// `changes` and `manifest` are static segments under a collection, so they take precedence over the
+/// item route: a record whose id is literally `changes` or `manifest` is not addressable. That is a
+/// consequence of the URL shape rather than a decision, and it is recorded as an open question.
 pub fn router<S>(state: ApiState<S>) -> Router
 where
     S: Store + 'static,
@@ -38,6 +42,14 @@ where
         .route(
             "/v1/{source}/{collection}",
             get(public::list_collection::<S>),
+        )
+        .route(
+            "/v1/{source}/{collection}/changes",
+            get(public::changes::<S>),
+        )
+        .route(
+            "/v1/{source}/{collection}/manifest",
+            get(public::manifest::<S>),
         )
         .route(
             "/v1/{source}/{collection}/{id}",

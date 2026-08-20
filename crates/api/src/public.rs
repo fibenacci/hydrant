@@ -20,8 +20,18 @@ use serde::{Deserialize, Serialize};
 
 use crate::cache::is_fresh;
 use crate::error::ApiError;
-use crate::response::{PageBody, RecordBody};
+use crate::response::{ChangesBody, ManifestBody, PageBody, RecordBody};
 use crate::state::ApiState;
+
+/// Query parameters of the change feed.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChangesQuery {
+    /// Feed position already seen. Everything after it is returned.
+    since: Option<u64>,
+    /// Page size, clamped like a listing's.
+    limit: Option<u16>,
+}
 
 /// Query parameters of a collection listing.
 ///
@@ -78,7 +88,7 @@ pub async fn list_collection<S: Store>(
     let cursor = query.cursor.map(Seq::new);
 
     let max_seq = state.store.max_seq(&source, &collection).await?;
-    let etag = listing_etag(max_seq, cursor, limit);
+    let etag = validator("l", max_seq, cursor, Some(limit));
     if is_fresh(&headers, &etag) {
         return Ok(not_modified(&state, &etag));
     }
@@ -125,6 +135,79 @@ pub async fn get_record<S: Store>(
     Ok((cache_headers(&state, &etag), Json(RecordBody::from(record))).into_response())
 }
 
+/// `GET /v1/{source}/{collection}/changes`
+///
+/// Every change after `?since=`, tombstones included, in feed order. This is how a consumer
+/// replicates rather than polls: it keeps the last `next_cursor` and asks again.
+///
+/// # Errors
+///
+/// Returns 400 for a malformed source or collection name and for any undeclared query parameter,
+/// and 500 if the store cannot answer.
+pub async fn changes<S: Store>(
+    State(state): State<ApiState<S>>,
+    Path((source, collection)): Path<(String, String)>,
+    query: Result<Query<ChangesQuery>, QueryRejection>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let source = parse::<SourceName>(&source, "source")?;
+    let collection = parse::<CollectionName>(&collection, "collection")?;
+    let Query(query) = query.map_err(|rejection| ApiError::BadRequest {
+        code: "invalid_query",
+        message: rejection.body_text(),
+    })?;
+
+    let limit = query
+        .limit
+        .map_or_else(PageLimit::default, PageLimit::clamp);
+    let since = query.since.map(Seq::new);
+
+    let max_seq = state.store.max_seq(&source, &collection).await?;
+    let etag = validator("c", max_seq, since, Some(limit));
+    if is_fresh(&headers, &etag) {
+        return Ok(not_modified(&state, &etag));
+    }
+
+    let page = state
+        .store
+        .changes(&source, &collection, since, limit)
+        .await?;
+    let body = ChangesBody::new(page, max_seq.map_or(0, Seq::get));
+    Ok((cache_headers(&state, &etag), Json(body)).into_response())
+}
+
+/// `GET /v1/{source}/{collection}/manifest`
+///
+/// The collection's count, checksum and feed position — enough for a sender to tell whether its own
+/// state matches, in one request. When it does not, the per-record digests say which record.
+///
+/// # Errors
+///
+/// Returns 400 for a malformed source or collection name, and 500 if the store cannot answer.
+pub async fn manifest<S: Store>(
+    State(state): State<ApiState<S>>,
+    Path((source, collection)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let source = parse::<SourceName>(&source, "source")?;
+    let collection = parse::<CollectionName>(&collection, "collection")?;
+
+    let max_seq = state.store.max_seq(&source, &collection).await?;
+    // The manifest is a function of the collection's state, and every change moves the feed
+    // position - so the position alone determines this representation.
+    let etag = validator("m", max_seq, None, None);
+    if is_fresh(&headers, &etag) {
+        return Ok(not_modified(&state, &etag));
+    }
+
+    let manifest = state.store.manifest(&source, &collection).await?;
+    Ok((
+        cache_headers(&state, &etag),
+        Json(ManifestBody::from(manifest)),
+    )
+        .into_response())
+}
+
 /// Parses a path segment, turning a grammar violation into a 400 that names the segment.
 fn parse<T>(value: &str, what: &str) -> Result<T, ApiError>
 where
@@ -134,17 +217,30 @@ where
     T::from_str(value).map_err(|error| ApiError::bad_path(what, &error))
 }
 
-/// The validator for a listing: the collection's position plus the page it describes.
+/// The validator for a collection-level representation: what the collection is at, plus which slice
+/// of it this response is.
 ///
 /// `max_seq` alone would be wrong — two pages of one collection share it while serving different
-/// records, and a cache keyed on the URL would still be allowed to answer a stale 304.
-fn listing_etag(max_seq: Option<Seq>, cursor: Option<Seq>, limit: PageLimit) -> String {
-    quoted(&format!(
-        "{}.{}.{}",
-        max_seq.map_or(0, Seq::get),
-        cursor.map_or(0, Seq::get),
-        limit.get()
-    ))
+/// records. The `kind` prefix keeps a listing, a feed page and a manifest from ever computing the
+/// same validator, so no cache can answer one with another.
+fn validator(
+    kind: &str,
+    max_seq: Option<Seq>,
+    cursor: Option<Seq>,
+    limit: Option<PageLimit>,
+) -> String {
+    let position = max_seq.map_or(0, Seq::get);
+    // Fixed arity per kind: a paged view always carries a cursor (0 for the first page) and a
+    // limit, a manifest carries neither. Otherwise two different slices could render the same
+    // validator by dropping an absent field.
+    match limit {
+        Some(limit) => quoted(&format!(
+            "{kind}.{position}.{}.{}",
+            cursor.map_or(0, Seq::get),
+            limit.get()
+        )),
+        None => quoted(&format!("{kind}.{position}")),
+    }
 }
 
 fn quoted(value: &str) -> String {

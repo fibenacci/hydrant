@@ -303,3 +303,187 @@ async fn health_reports_liveness(pool: PgPool) {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["status"], "ok");
 }
+
+#[sqlx::test(migrations = "../store/migrations")]
+async fn the_change_feed_carries_a_tombstone(pool: PgPool) {
+    let store = PostgresStore::from_pool(pool.clone());
+    store
+        .upsert(&key("SW1"), &json!({ "sku": "SW-1" }))
+        .await
+        .expect("stored");
+    store
+        .upsert(&key("SW2"), &json!({ "sku": "SW-2" }))
+        .await
+        .expect("stored");
+    store.delete(&key("SW1")).await.expect("deleted");
+
+    let app = app(pool);
+    let (status, _, body) = get(&app, "/v1/sap-stage/catalog.product/changes", None).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let changes = body["changes"].as_array().expect("changes");
+    assert_eq!(changes.len(), 2);
+    let tombstone = changes.last().expect("the deletion");
+    assert_eq!(tombstone["id"], "SW1");
+    assert_eq!(tombstone["deleted"], true);
+    assert_eq!(tombstone["payload"], json!({}));
+    // The listing does not show it; the feed must.
+    let (_, _, listing) = get(&app, "/v1/sap-stage/catalog.product", None).await;
+    assert_eq!(listing["records"].as_array().expect("records").len(), 1);
+}
+
+#[sqlx::test(migrations = "../store/migrations")]
+async fn the_change_feed_resumes_from_a_cursor(pool: PgPool) {
+    let store = PostgresStore::from_pool(pool.clone());
+    store
+        .upsert(&key("SW1"), &json!({ "a": 1 }))
+        .await
+        .expect("stored");
+    store
+        .upsert(&key("SW2"), &json!({ "a": 2 }))
+        .await
+        .expect("stored");
+    let app = app(pool);
+
+    let (_, _, first) = get(&app, "/v1/sap-stage/catalog.product/changes?limit=1", None).await;
+    let cursor = first["next_cursor"]
+        .as_u64()
+        .expect("a full page offers a cursor");
+    assert_eq!(first["changes"][0]["id"], "SW1");
+
+    let (_, _, second) = get(
+        &app,
+        &format!("/v1/sap-stage/catalog.product/changes?since={cursor}&limit=1"),
+        None,
+    )
+    .await;
+    assert_eq!(second["changes"][0]["id"], "SW2");
+}
+
+#[sqlx::test(migrations = "../store/migrations")]
+async fn a_caught_up_consumer_gets_304_until_something_changes(pool: PgPool) {
+    let store = PostgresStore::from_pool(pool.clone());
+    store
+        .upsert(&key("SW1"), &json!({ "a": 1 }))
+        .await
+        .expect("stored");
+    let app = app(pool);
+
+    let (_, etag, _) = get(&app, "/v1/sap-stage/catalog.product/changes", None).await;
+    let etag = etag.expect("etag");
+
+    let (status, _, _) = get(&app, "/v1/sap-stage/catalog.product/changes", Some(&etag)).await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_MODIFIED,
+        "nothing changed, so nothing to send"
+    );
+
+    store
+        .upsert(&key("SW2"), &json!({ "a": 2 }))
+        .await
+        .expect("stored");
+    let (status, _, body) = get(&app, "/v1/sap-stage/catalog.product/changes", Some(&etag)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["changes"].as_array().expect("changes").len(), 2);
+}
+
+#[sqlx::test(migrations = "../store/migrations")]
+async fn a_manifest_reports_what_a_sender_can_reproduce(pool: PgPool) {
+    let store = PostgresStore::from_pool(pool.clone());
+    let live = json!({ "sku": "SW-2" });
+    store
+        .upsert(&key("SW1"), &json!({ "sku": "SW-1" }))
+        .await
+        .expect("stored");
+    store.upsert(&key("SW2"), &live).await.expect("stored");
+    store.delete(&key("SW1")).await.expect("deleted");
+
+    let (status, etag, body) =
+        get(&app(pool), "/v1/sap-stage/catalog.product/manifest", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["count"], 1,
+        "a tombstone is not a record the collection holds"
+    );
+    assert!(body["max_seq"].as_u64().expect("max_seq") > 0);
+    assert!(etag.is_some());
+
+    let expected = hydrant_core::collection_checksum([(
+        "SW2",
+        hydrant_core::content_hash(&live).expect("hash"),
+    )])
+    .expect("checksum");
+    assert_eq!(body["checksum"], expected.to_hex());
+}
+
+#[sqlx::test(migrations = "../store/migrations")]
+async fn a_manifest_is_conditional_too(pool: PgPool) {
+    let store = PostgresStore::from_pool(pool.clone());
+    store
+        .upsert(&key("SW1"), &json!({ "a": 1 }))
+        .await
+        .expect("stored");
+    let app = app(pool);
+
+    let (_, etag, _) = get(&app, "/v1/sap-stage/catalog.product/manifest", None).await;
+    let (status, _, _) = get(
+        &app,
+        "/v1/sap-stage/catalog.product/manifest",
+        Some(&etag.expect("etag")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_MODIFIED);
+}
+
+#[sqlx::test(migrations = "../store/migrations")]
+async fn an_unknown_feed_parameter_is_refused(pool: PgPool) {
+    let (status, _, body) = get(
+        &app(pool),
+        "/v1/sap-stage/catalog.product/changes?cursor=3",
+        None,
+    )
+    .await;
+    // The feed's parameter is `since`, not `cursor`. A silently ignored one would leave a consumer
+    // convinced it had replicated from a position it never asked for.
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "invalid_query");
+}
+
+#[sqlx::test(migrations = "../store/migrations")]
+async fn the_three_collection_views_never_share_a_validator(pool: PgPool) {
+    let store = PostgresStore::from_pool(pool.clone());
+    store
+        .upsert(&key("SW1"), &json!({ "a": 1 }))
+        .await
+        .expect("stored");
+    let app = app(pool);
+
+    let (_, listing, _) = get(&app, "/v1/sap-stage/catalog.product", None).await;
+    let (_, feed, _) = get(&app, "/v1/sap-stage/catalog.product/changes", None).await;
+    let (_, manifest, _) = get(&app, "/v1/sap-stage/catalog.product/manifest", None).await;
+
+    assert_ne!(listing, feed);
+    assert_ne!(listing, manifest);
+    assert_ne!(feed, manifest);
+}
+
+#[sqlx::test(migrations = "../store/migrations")]
+async fn the_feed_route_shadows_a_record_of_the_same_name(pool: PgPool) {
+    // Documents a consequence of the URL shape rather than a decision: `changes` and `manifest` are
+    // static segments, so a record with one of those ids is not addressable. Recorded as an open
+    // question rather than silently accepted.
+    let store = PostgresStore::from_pool(pool.clone());
+    store
+        .upsert(&key("changes"), &json!({ "sku": "unreachable" }))
+        .await
+        .expect("stored");
+
+    let (status, _, body) = get(&app(pool), "/v1/sap-stage/catalog.product/changes", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body["changes"].is_array(),
+        "the feed answers, not the record"
+    );
+    assert!(!body.to_string().contains("unreachable") || body["changes"][0]["id"] == "changes");
+}
