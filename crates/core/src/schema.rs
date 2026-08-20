@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::str::FromStr;
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::ident::{CollectionName, IdentError, MAX_NAME_LEN, RecordId};
@@ -53,6 +54,12 @@ pub enum SchemaError {
         /// The offending name.
         field: String,
     },
+    /// Two definitions claimed the same collection name.
+    #[error("collection `{collection}` is defined twice")]
+    DuplicateCollection {
+        /// The repeated collection name.
+        collection: String,
+    },
     /// The same key appeared twice in `filters` or `sort`.
     #[error("{usage} lists `{field}` twice")]
     Duplicate {
@@ -67,8 +74,23 @@ pub enum SchemaError {
 ///
 /// Dots are refused so that a dotted path in a drop report — `attributes.color` — has exactly one
 /// reading.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
 pub struct FieldName(String);
+
+impl TryFrom<String> for FieldName {
+    type Error = IdentError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl From<FieldName> for String {
+    fn from(value: FieldName) -> Self {
+        value.0
+    }
+}
 
 impl FieldName {
     /// Validates `value` and wraps it.
@@ -173,7 +195,8 @@ impl fmt::Display for ScalarType {
 ///
 /// There is no variant that passes a subtree through unexamined. Nesting is allow-listed at every
 /// level, because a wildcard one level down releases whatever the source system adds there next.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "FieldSpecRepr")]
 pub enum FieldSpec {
     /// A scalar, optionally indexed so it may be filtered and sorted on.
     Scalar {
@@ -280,13 +303,120 @@ impl FieldSpec {
     }
 }
 
+/// The declared form of a field, as a schema file writes it.
+///
+/// Kept separate from [`FieldSpec`] so the type the rest of the code sees cannot be constructed
+/// without going through validation — and so `deny_unknown_fields` can reject a misspelled key
+/// instead of silently ignoring it. A typo in `index:` would otherwise turn an indexed field into
+/// an unindexed one, and the first symptom would be a slow query on a public endpoint.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
+enum FieldSpecRepr {
+    /// `type: string`
+    String {
+        /// Whether the store maintains an index for this field.
+        #[serde(default)]
+        index: bool,
+    },
+    /// `type: number`
+    Number {
+        /// Whether the store maintains an index for this field.
+        #[serde(default)]
+        index: bool,
+    },
+    /// `type: boolean`
+    Boolean {
+        /// Whether the store maintains an index for this field.
+        #[serde(default)]
+        index: bool,
+    },
+    /// `type: object` with its allow list. There is no form without one.
+    Object {
+        /// The keys this object releases.
+        allow: AllowList,
+    },
+    /// `type: array` with the specification every element must satisfy.
+    Array {
+        /// The element specification.
+        items: Box<FieldSpecRepr>,
+    },
+}
+
+/// The two ways to write an object's allow list.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum AllowList {
+    /// `allow: [color, size]` — named keys whose scalar type is not constrained.
+    Names(Vec<FieldName>),
+    /// `allow: { dimensions: { type: object, allow: [...] } }` — named keys with their own
+    /// specifications, which is how nesting deeper than one level is declared.
+    Specs(BTreeMap<FieldName, FieldSpecRepr>),
+}
+
+impl TryFrom<FieldSpecRepr> for FieldSpec {
+    type Error = SchemaError;
+
+    fn try_from(repr: FieldSpecRepr) -> Result<Self, Self::Error> {
+        Ok(match repr {
+            FieldSpecRepr::String { index } => Self::Scalar {
+                ty: ScalarType::String,
+                index,
+            },
+            FieldSpecRepr::Number { index } => Self::Scalar {
+                ty: ScalarType::Number,
+                index,
+            },
+            FieldSpecRepr::Boolean { index } => Self::Scalar {
+                ty: ScalarType::Boolean,
+                index,
+            },
+            FieldSpecRepr::Object { allow } => Self::Object {
+                allow: allow.try_into()?,
+            },
+            FieldSpecRepr::Array { items } => Self::array(Self::try_from(*items)?),
+        })
+    }
+}
+
+impl TryFrom<AllowList> for BTreeMap<FieldName, FieldSpec> {
+    type Error = SchemaError;
+
+    fn try_from(allow: AllowList) -> Result<Self, Self::Error> {
+        match allow {
+            AllowList::Names(names) => Ok(names
+                .into_iter()
+                .map(|name| (name, FieldSpec::scalar(ScalarType::Any)))
+                .collect()),
+            AllowList::Specs(specs) => specs
+                .into_iter()
+                .map(|(name, repr)| FieldSpec::try_from(repr).map(|spec| (name, spec)))
+                .collect(),
+        }
+    }
+}
+
 /// Where a record's identifier sits inside the incoming payload.
 ///
 /// Written `$.id` or `$.meta.id` in a schema file. The identifier is lifted out of the payload
 /// before projection and stored as part of the record's key, so it does not need to be — and
 /// usually is not — a released field.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
 pub struct IdPath(Vec<FieldName>);
+
+impl TryFrom<String> for IdPath {
+    type Error = SchemaError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        value.parse()
+    }
+}
+
+impl From<IdPath> for String {
+    fn from(value: IdPath) -> Self {
+        value.to_string()
+    }
+}
 
 impl IdPath {
     /// Builds a path from its segments.
@@ -403,11 +533,17 @@ pub enum IdError {
 }
 
 /// Cache directives a collection's responses carry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CacheSpec {
+    #[serde(default = "default_shared_max_age")]
     /// `s-maxage` for shared caches, in seconds. A CDN in front is the scaling plan for a public
     /// read service, so this is a first-class part of the collection definition.
     pub shared_max_age: u32,
+}
+
+const fn default_shared_max_age() -> u32 {
+    DEFAULT_SHARED_MAX_AGE
 }
 
 impl Default for CacheSpec {
@@ -419,13 +555,33 @@ impl Default for CacheSpec {
 }
 
 /// A key a collection may be sorted by.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
 pub enum SortKey {
     /// The change-feed position. Always available, and the only stable order under concurrent
     /// ingest.
     Seq,
     /// An indexed scalar field.
     Field(FieldName),
+}
+
+impl TryFrom<String> for SortKey {
+    type Error = IdentError;
+
+    /// `seq` names the feed position; anything else has to be a declared field.
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        if value == "seq" {
+            Ok(Self::Seq)
+        } else {
+            FieldName::new(value).map(Self::Field)
+        }
+    }
+}
+
+impl From<SortKey> for String {
+    fn from(value: SortKey) -> Self {
+        value.to_string()
+    }
 }
 
 impl fmt::Display for SortKey {
@@ -437,8 +593,39 @@ impl fmt::Display for SortKey {
     }
 }
 
+/// The declared form of a collection, as a schema file writes it.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CollectionSchemaRepr {
+    collection: CollectionName,
+    id: IdPath,
+    fields: BTreeMap<FieldName, FieldSpec>,
+    #[serde(default)]
+    filters: Vec<FieldName>,
+    #[serde(default)]
+    sort: Vec<SortKey>,
+    #[serde(default)]
+    cache: CacheSpec,
+}
+
+impl TryFrom<CollectionSchemaRepr> for CollectionSchema {
+    type Error = SchemaError;
+
+    fn try_from(repr: CollectionSchemaRepr) -> Result<Self, Self::Error> {
+        Self::new(
+            repr.collection,
+            repr.id,
+            repr.fields,
+            repr.filters,
+            repr.sort,
+            repr.cache,
+        )
+    }
+}
+
 /// A validated collection definition.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "CollectionSchemaRepr")]
 pub struct CollectionSchema {
     collection: CollectionName,
     id: IdPath,
@@ -564,6 +751,64 @@ impl CollectionSchema {
     #[must_use]
     pub const fn cache(&self) -> CacheSpec {
         self.cache
+    }
+}
+
+/// Every collection the service serves.
+///
+/// The service validates schemas at boot and refuses to start on an invalid one: there is no
+/// partial-load mode, because a half-loaded set would mean a collection serving fields nobody
+/// reviewed — or, worse, a collection silently missing.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SchemaSet(BTreeMap<CollectionName, CollectionSchema>);
+
+impl SchemaSet {
+    /// Collects definitions, rejecting a collection that is defined twice.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SchemaError::DuplicateCollection`] if two definitions claim the same name. Two
+    /// files disagreeing about one collection is not something to resolve by file order.
+    pub fn new(schemas: impl IntoIterator<Item = CollectionSchema>) -> Result<Self, SchemaError> {
+        let mut set = BTreeMap::new();
+        for schema in schemas {
+            let name = schema.collection().clone();
+            if set.insert(name.clone(), schema).is_some() {
+                return Err(SchemaError::DuplicateCollection {
+                    collection: name.to_string(),
+                });
+            }
+        }
+        Ok(Self(set))
+    }
+
+    /// The definition of `collection`, if it is served at all.
+    #[must_use]
+    pub fn get(&self, collection: &CollectionName) -> Option<&CollectionSchema> {
+        self.0.get(collection)
+    }
+
+    /// Whether `collection` is served.
+    #[must_use]
+    pub fn contains(&self, collection: &CollectionName) -> bool {
+        self.0.contains_key(collection)
+    }
+
+    /// How many collections are defined.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Whether no collection is defined at all.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// The definitions, in collection-name order.
+    pub fn iter(&self) -> impl Iterator<Item = (&CollectionName, &CollectionSchema)> {
+        self.0.iter()
     }
 }
 
@@ -756,6 +1001,141 @@ mod tests {
             path.extract(&json!({ "id": "a/b" })),
             Err(IdError::Invalid { .. })
         ));
+    }
+
+    /// The documented shape, as JSON. serde is format-agnostic, so this is the same shape a YAML
+    /// schema file declares — the loader that reads the file is tested against the real file.
+    fn example_document() -> Value {
+        json!({
+            "collection": "catalog.product",
+            "id": "$.id",
+            "fields": {
+                "name": { "type": "string", "index": true },
+                "sku": { "type": "string", "index": true },
+                "price": { "type": "number" },
+                "attributes": { "type": "object", "allow": ["color", "size", "material"] },
+                "images": { "type": "array", "items": { "type": "string" } }
+            },
+            "filters": ["sku", "name"],
+            "sort": ["seq", "name"],
+            "cache": { "shared_max_age": 300 }
+        })
+    }
+
+    #[test]
+    fn a_schema_deserialises_from_the_documented_shape() {
+        let schema: CollectionSchema =
+            serde_json::from_value(example_document()).expect("valid schema");
+
+        assert_eq!(schema.collection().as_str(), "catalog.product");
+        assert_eq!(schema.id().to_string(), "$.id");
+        assert_eq!(schema.fields().len(), 5);
+        assert_eq!(
+            schema.fields()[&name("sku")],
+            FieldSpec::indexed(ScalarType::String)
+        );
+        assert_eq!(
+            schema.fields()[&name("price")],
+            FieldSpec::scalar(ScalarType::Number)
+        );
+        assert_eq!(
+            schema.fields()[&name("images")],
+            FieldSpec::array(FieldSpec::scalar(ScalarType::String))
+        );
+        assert_eq!(schema.filters(), [name("sku"), name("name")]);
+        assert_eq!(schema.sort(), [SortKey::Seq, SortKey::Field(name("name"))]);
+        assert_eq!(schema.cache().shared_max_age, 300);
+    }
+
+    #[test]
+    fn an_allow_list_of_names_becomes_unconstrained_scalars() {
+        let schema: CollectionSchema =
+            serde_json::from_value(example_document()).expect("valid schema");
+        let FieldSpec::Object { allow } = &schema.fields()[&name("attributes")] else {
+            panic!("attributes is declared an object");
+        };
+        assert_eq!(allow.len(), 3);
+        assert_eq!(allow[&name("color")], FieldSpec::scalar(ScalarType::Any));
+    }
+
+    #[test]
+    fn an_allow_list_may_also_declare_nested_specifications() {
+        let schema: CollectionSchema = serde_json::from_value(json!({
+            "collection": "catalog.product",
+            "id": "$.id",
+            "fields": {
+                "attributes": {
+                    "type": "object",
+                    "allow": {
+                        "color": { "type": "string" },
+                        "dimensions": { "type": "object", "allow": ["width", "height"] }
+                    }
+                }
+            }
+        }))
+        .expect("valid schema");
+
+        let FieldSpec::Object { allow } = &schema.fields()[&name("attributes")] else {
+            panic!("attributes is declared an object");
+        };
+        assert_eq!(allow[&name("color")], FieldSpec::scalar(ScalarType::String));
+        let FieldSpec::Object { allow: nested } = &allow[&name("dimensions")] else {
+            panic!("dimensions is declared an object");
+        };
+        assert_eq!(nested.len(), 2);
+    }
+
+    #[test]
+    fn a_misspelled_declaration_key_is_refused_rather_than_ignored() {
+        // `indexed` instead of `index` would otherwise leave the field unindexed, and the first
+        // symptom would be a sequential scan on a public endpoint.
+        let error = serde_json::from_value::<CollectionSchema>(json!({
+            "collection": "catalog.product",
+            "id": "$.id",
+            "fields": { "sku": { "type": "string", "indexed": true } }
+        }))
+        .expect_err("must be refused");
+        assert!(error.to_string().contains("indexed"), "{error}");
+    }
+
+    #[test]
+    fn deserialisation_runs_the_same_validation_as_construction() {
+        let wildcard = serde_json::from_value::<CollectionSchema>(json!({
+            "collection": "catalog.product",
+            "id": "$.id",
+            "fields": { "attributes": { "type": "object", "allow": [] } }
+        }))
+        .expect_err("an empty allow list is not a wildcard");
+        assert!(wildcard.to_string().contains("no allow list"), "{wildcard}");
+
+        let unindexed = serde_json::from_value::<CollectionSchema>(json!({
+            "collection": "catalog.product",
+            "id": "$.id",
+            "fields": { "price": { "type": "number" } },
+            "filters": ["price"]
+        }))
+        .expect_err("filtering needs an index");
+        assert!(
+            unindexed.to_string().contains("not an indexed scalar"),
+            "{unindexed}"
+        );
+    }
+
+    #[test]
+    fn a_schema_set_refuses_a_collection_defined_twice() {
+        let schema: CollectionSchema =
+            serde_json::from_value(example_document()).expect("valid schema");
+        let set = SchemaSet::new([schema.clone()]).expect("one definition");
+        assert!(set.contains(&collection()));
+        assert_eq!(set.len(), 1);
+
+        let error = SchemaSet::new([schema.clone(), schema]).expect_err("two definitions");
+        assert_eq!(
+            error,
+            SchemaError::DuplicateCollection {
+                collection: "catalog.product".to_owned()
+            }
+        );
     }
 
     #[test]

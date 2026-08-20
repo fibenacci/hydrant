@@ -27,5 +27,6 @@ pub use hash::{ContentHash, canonicalize, collection_checksum, content_hash};
 pub use ident::{CollectionName, RecordId, RecordKey, Seq, SourceName};
 pub use projection::{DropReason, DroppedField, Projection, ProjectionError, project};
 pub use schema::{
-    CacheSpec, CollectionSchema, FieldName, FieldSpec, IdPath, ScalarType, SchemaError, SortKey,
+    CacheSpec, CollectionSchema, FieldName, FieldSpec, IdPath, ScalarType, SchemaError, SchemaSet,
+    SortKey,
 };
