@@ -46,7 +46,7 @@ Code that violates one of these is wrong even if it passes every test.
 crates/core/     domain types, JCS hashing, projection engine — MUST stay free of I/O deps
 crates/store/    trait Store + PostgreSQL implementation
 crates/api/      axum routers: public + ingest
-crates/server/   binary, config, telemetry
+crates/server/   library (config, schema loading, assembled service) plus the binary
 crates/cli/      schema validate | drift check | reproject | backfill
 schemas/         example collection definitions
 sdk/php/         sender SDK

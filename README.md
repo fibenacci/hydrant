@@ -72,8 +72,11 @@ ordinary reads — a feed page can be a thousand records and cannot be answered 
 validator alone. Liveness is never limited, and the authenticated ingest surface is not limited by
 IP at all: throttling a known sender by address is the wrong knob.
 
-Not there yet: sorting by a payload field, a response size cap, the generated OpenAPI document,
-and the CLI.
+Sizes are bounded in both directions. A record's projected payload has a limit, and a page has a
+byte budget on top of its record count — a page that runs out of budget ends early and offers a
+cursor, so nothing becomes unreachable, including a record larger than a whole page.
+
+Not there yet: sorting by a payload field, the generated OpenAPI document, and the CLI.
 
 What the service guarantees is in [CONTRIBUTING.md](CONTRIBUTING.md#invariants); how it is
 built is in the [Makefile](Makefile).
