@@ -25,6 +25,22 @@ pub struct Config {
     pub listen: SocketAddr,
     /// Upper bound on pooled database connections.
     pub max_connections: u32,
+    /// Sustained read rate per client, per second.
+    pub read_per_second: u32,
+    /// How many read requests a client may make at once.
+    pub read_burst: u32,
+    /// Sustained change-feed rate per client, per second.
+    ///
+    /// Lower than the read rate on purpose: a feed page can be a thousand records and cannot be
+    /// answered from a cache validator alone.
+    pub feed_per_second: u32,
+    /// How many feed requests a client may make at once.
+    pub feed_burst: u32,
+    /// Whether to key rate limits on `X-Forwarded-For` rather than the peer address.
+    ///
+    /// Only turn this on when everything in front of the service overwrites that header. Otherwise a
+    /// client can hand itself a fresh budget per request by setting it.
+    pub trust_forwarded_for: bool,
     /// Address the Prometheus exporter listens on.
     ///
     /// A separate listener, not a route on the public router: metrics describe the deployment, and
@@ -59,6 +75,11 @@ impl Default for Config {
             token_secret: String::new(),
             listen: SocketAddr::from(([0, 0, 0, 0], 8080)),
             max_connections: 10,
+            read_per_second: 20,
+            read_burst: 60,
+            feed_per_second: 2,
+            feed_burst: 10,
+            trust_forwarded_for: false,
             metrics_listen: SocketAddr::from(([127, 0, 0, 1], 9090)),
             schemas_dir: PathBuf::from("schemas"),
             migrate_on_start: true,

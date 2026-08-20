@@ -11,7 +11,7 @@ use axum::http::header::{ETAG, IF_NONE_MATCH};
 use axum::http::{Method, StatusCode};
 use axum::middleware;
 use clap::{Parser, Subcommand};
-use hydrant_api::{ApiState, IngestState, ingest_router, metrics, router};
+use hydrant_api::{ApiState, IngestState, RateLimits, ingest_router, metrics, router};
 use hydrant_core::{SchemaSet, SourceName};
 use hydrant_store::{PostgresStore, Store, Token};
 use metrics_exporter_prometheus::PrometheusBuilder;
@@ -102,7 +102,11 @@ async fn serve(config: Config) -> Result<(), Box<dyn Error>> {
     let listener = TcpListener::bind(config.listen).await?;
     tracing::info!(address = %listener.local_addr()?, "serving");
 
-    axum::serve(listener, service(store, schemas, &config))
+    // `into_make_service_with_connect_info` is what puts the peer address in the request, and the
+    // rate limiter is keyed on it. Without it every limited route fails closed.
+    let service = service(store, schemas, &config)?
+        .into_make_service_with_connect_info::<std::net::SocketAddr>();
+    axum::serve(listener, service)
         .with_graceful_shutdown(shutdown())
         .await?;
     Ok(())
@@ -155,7 +159,11 @@ fn install_metrics(address: std::net::SocketAddr) -> Result<(), Box<dyn Error>> 
 }
 
 /// The router with the layers a public endpoint needs.
-fn service(store: PostgresStore, schemas: SchemaSet, config: &Config) -> Router {
+fn service(
+    store: PostgresStore,
+    schemas: SchemaSet,
+    config: &Config,
+) -> Result<Router, Box<dyn Error>> {
     // CORS is wide open on purpose: the data is public, and a browser consumer is as legitimate as
     // any other. `expose_headers` is the part that is easy to miss — without it a browser can send
     // a conditional request but cannot read the ETag to build the next one.
@@ -167,14 +175,21 @@ fn service(store: PostgresStore, schemas: SchemaSet, config: &Config) -> Router 
 
     // Two routers with two states: the ingest one holds the application secret, the public one
     // cannot see it. That is a boundary rather than a comment.
-    let public = router(ApiState::new(store.clone(), schemas.clone()));
+    let limits = RateLimits {
+        read_per_second: config.read_per_second,
+        read_burst: config.read_burst,
+        feed_per_second: config.feed_per_second,
+        feed_burst: config.feed_burst,
+        trust_forwarded_for: config.trust_forwarded_for,
+    };
+    let public = router(ApiState::new(store.clone(), schemas.clone()), limits)?;
     let ingest = ingest_router(IngestState::new(
         store,
         schemas,
         config.token_secret.as_bytes(),
     ));
 
-    public
+    Ok(public
         .merge(ingest)
         // Outermost, so it sees the status a caller actually gets - including the one the timeout
         // layer below produces.
@@ -187,7 +202,7 @@ fn service(store: PostgresStore, schemas: SchemaSet, config: &Config) -> Router 
         ))
         .layer(CompressionLayer::new())
         .layer(cors)
-        .layer(TraceLayer::new_for_http())
+        .layer(TraceLayer::new_for_http()))
 }
 
 /// Reads the filter from configuration, letting `RUST_LOG` override it — the usual expectation when
