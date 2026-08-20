@@ -8,15 +8,17 @@
 
 use axum::Router;
 use axum::body::Body;
+use axum::extract::ConnectInfo;
 use axum::http::header::{CACHE_CONTROL, ETAG, IF_NONE_MATCH};
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
-use hydrant_api::{ApiState, router};
+use hydrant_api::{ApiState, RateLimits, router};
 use hydrant_core::schema::CollectionSchema;
 use hydrant_core::{CollectionName, RecordId, RecordKey, SchemaSet, SourceName};
 use hydrant_store::{PostgresStore, Store};
 use serde_json::{Value, json};
 use sqlx::PgPool;
+use std::net::SocketAddr;
 use tower::ServiceExt;
 
 fn key(id: &str) -> RecordKey {
@@ -57,8 +59,28 @@ fn schemas() -> SchemaSet {
     SchemaSet::new([product, category]).expect("distinct collections")
 }
 
+/// Limits high enough that no test trips them; the limits themselves are tested in `limits.rs`.
+fn generous() -> RateLimits {
+    RateLimits {
+        read_per_second: 1000,
+        read_burst: 1000,
+        feed_per_second: 1000,
+        feed_burst: 1000,
+        trust_forwarded_for: false,
+    }
+}
+
 fn app(pool: PgPool) -> Router {
-    router(ApiState::new(PostgresStore::from_pool(pool), schemas()))
+    router(
+        ApiState::new(PostgresStore::from_pool(pool), schemas()),
+        generous(),
+    )
+    .expect("usable limits")
+}
+
+/// Every request needs a peer address: that is what a per-client rate limit is keyed on.
+fn peer() -> ConnectInfo<SocketAddr> {
+    ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 4000)))
 }
 
 /// One request. Returns status, the `ETag` if there was one, and the parsed body.
@@ -67,7 +89,7 @@ async fn get(
     uri: &str,
     if_none_match: Option<&str>,
 ) -> (StatusCode, Option<String>, Value) {
-    let mut request = Request::builder().uri(uri);
+    let mut request = Request::builder().uri(uri).extension(peer());
     if let Some(validator) = if_none_match {
         request = request.header(IF_NONE_MATCH, validator);
     }
@@ -314,6 +336,7 @@ async fn every_cacheable_response_says_it_is_public(pool: PgPool) {
             .oneshot(
                 Request::builder()
                     .uri(uri)
+                    .extension(peer())
                     .body(Body::empty())
                     .expect("request"),
             )
@@ -547,6 +570,7 @@ async fn cache_directives_come_from_the_collection(pool: PgPool) {
                 .oneshot(
                     Request::builder()
                         .uri(uri)
+                        .extension(peer())
                         .body(Body::empty())
                         .expect("request"),
                 )

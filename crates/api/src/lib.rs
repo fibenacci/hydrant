@@ -15,6 +15,7 @@
 pub mod cache;
 pub mod error;
 pub mod ingest;
+pub mod limits;
 pub mod metrics;
 pub mod public;
 pub mod query;
@@ -24,42 +25,36 @@ pub mod state;
 use axum::Router;
 use axum::routing::{delete, get, post};
 use hydrant_store::Store;
+use tower_governor::key_extractor::{PeerIpKeyExtractor, SmartIpKeyExtractor};
 
 pub use error::ApiError;
 pub use ingest::IngestState;
+pub use limits::{LimitError, RateLimits};
 pub use response::{ChangeBody, ChangesBody, ManifestBody, PageBody, RecordBody};
 pub use state::ApiState;
 
-/// The public read router.
+/// The public read router, with its rate limits.
 ///
-/// `/health` is liveness for an orchestrator, not part of the data surface.
+/// `/health` is liveness for an orchestrator, not part of the data surface, and is not rate limited.
 ///
 /// `changes` and `manifest` are static segments under a collection, so they take precedence over the
 /// item route: a record whose id is literally `changes` or `manifest` is not addressable. That is a
 /// consequence of the URL shape rather than a decision, and it is recorded as an open question.
-pub fn router<S>(state: ApiState<S>) -> Router
+///
+/// # Errors
+///
+/// Returns [`limits::LimitError`] if a configured limit would refuse every request.
+pub fn router<S>(state: ApiState<S>, limits: RateLimits) -> Result<Router, LimitError>
 where
     S: Store + 'static,
 {
-    Router::new()
-        .route("/health", get(public::health))
-        .route(
-            "/v1/{source}/{collection}",
-            get(public::list_collection::<S>),
-        )
-        .route(
-            "/v1/{source}/{collection}/changes",
-            get(public::changes::<S>),
-        )
-        .route(
-            "/v1/{source}/{collection}/manifest",
-            get(public::manifest::<S>),
-        )
-        .route(
-            "/v1/{source}/{collection}/{id}",
-            get(public::get_record::<S>),
-        )
-        .with_state(state)
+    // The key is what a limit is per. Trusting a forwarded header when nothing overwrites it hands
+    // every client a fresh bucket per request, so the peer address is the default.
+    if limits.trust_forwarded_for {
+        limits::public_router(state, limits, SmartIpKeyExtractor)
+    } else {
+        limits::public_router(state, limits, PeerIpKeyExtractor)
+    }
 }
 
 /// The authenticated ingest router.
