@@ -10,17 +10,18 @@ use std::str::FromStr;
 
 use axum::Json;
 use axum::extract::rejection::QueryRejection;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, Query, RawQuery, State};
 use axum::http::header::{CACHE_CONTROL, ETAG};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use hydrant_core::schema::CollectionSchema;
-use hydrant_core::{CollectionName, RecordId, RecordKey, Seq, SourceName};
+use hydrant_core::{CollectionName, Filter, RecordId, RecordKey, Seq, SourceName, content_hash};
 use hydrant_store::{PageLimit, Store};
 use serde::{Deserialize, Serialize};
 
 use crate::cache::is_fresh;
 use crate::error::ApiError;
+use crate::query::parse_list_params;
 use crate::response::{ChangesBody, ManifestBody, PageBody, RecordBody};
 use crate::state::ApiState;
 
@@ -32,20 +33,6 @@ pub struct ChangesQuery {
     since: Option<u64>,
     /// Page size, clamped like a listing's.
     limit: Option<u16>,
-}
-
-/// Query parameters of a collection listing.
-///
-/// `deny_unknown_fields` is the point: an undeclared parameter is a 400, never something quietly
-/// ignored. A client that misspells `cursor` has to find out, and a filter that is not declared in
-/// the collection schema must not look like it worked.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ListQuery {
-    /// Page size. Clamped server-side to [`PageLimit::MAX`], whatever is asked for.
-    limit: Option<u16>,
-    /// Feed position to continue after, from a previous page's `next_cursor`.
-    cursor: Option<u64>,
 }
 
 /// Liveness only: it says the process is up and serving, not that the database is reachable.
@@ -73,31 +60,36 @@ pub async fn health() -> Response {
 pub async fn list_collection<S: Store>(
     State(state): State<ApiState<S>>,
     Path((source, collection)): Path<(String, String)>,
-    query: Result<Query<ListQuery>, QueryRejection>,
+    RawQuery(query): RawQuery,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let source = parse::<SourceName>(&source, "source")?;
     let collection = parse::<CollectionName>(&collection, "collection")?;
-    let max_age = shared_max_age(&state, &collection)?;
-    let Query(query) = query.map_err(|rejection| ApiError::BadRequest {
-        code: "invalid_query",
-        message: rejection.body_text(),
-    })?;
+    let schema = schema(&state, &collection)?;
+    let max_age = schema.cache().shared_max_age;
 
-    let limit = query
+    let params = parse_list_params(query.as_deref())?;
+    let filter =
+        Filter::parse(schema, params.filters.iter().map(|(f, v)| (f, v))).map_err(|error| {
+            ApiError::BadRequest {
+                code: "invalid_filter",
+                message: error.to_string(),
+            }
+        })?;
+    let limit = params
         .limit
         .map_or_else(PageLimit::default, PageLimit::clamp);
-    let cursor = query.cursor.map(Seq::new);
+    let cursor = params.cursor.map(Seq::new);
 
     let max_seq = state.store.max_seq(&source, &collection).await?;
-    let etag = validator("l", max_seq, cursor, Some(limit));
+    let etag = listing_validator(max_seq, cursor, limit, &filter);
     if is_fresh(&headers, &etag) {
         return Ok(not_modified(max_age, &etag));
     }
 
     let page = state
         .store
-        .list(&source, &collection, cursor, limit)
+        .list(&source, &collection, &filter, cursor, limit)
         .await?;
     let body = PageBody::new(page, max_seq.map_or(0, Seq::get));
     Ok((cache_headers(max_age, &etag), Json(body)).into_response())
@@ -233,6 +225,30 @@ where
 /// `max_seq` alone would be wrong — two pages of one collection share it while serving different
 /// records. The `kind` prefix keeps a listing, a feed page and a manifest from ever computing the
 /// same validator, so no cache can answer one with another.
+/// The validator for a listing, filters included.
+///
+/// A filtered page and an unfiltered one share a collection position and page parameters while
+/// serving different records, so the filter belongs in the validator as much as the cursor does.
+/// The filter is folded in through the canonical form, which is the one rendering of it that two
+/// implementations agree on.
+fn listing_validator(
+    max_seq: Option<Seq>,
+    cursor: Option<Seq>,
+    limit: PageLimit,
+    filter: &Filter,
+) -> String {
+    let base = validator("l", max_seq, cursor, Some(limit));
+    if filter.is_empty() {
+        return base;
+    }
+    let fingerprint = content_hash(&filter.as_json()).map_or_else(
+        |_| "unhashable".to_owned(),
+        |hash| hash.to_hex()[..16].to_owned(),
+    );
+    // `base` is quoted; splice the fingerprint in before the closing quote.
+    format!("{}.{fingerprint}\"", base.trim_end_matches('"'))
+}
+
 fn validator(
     kind: &str,
     max_seq: Option<Seq>,

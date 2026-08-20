@@ -36,10 +36,11 @@ fn schemas() -> SchemaSet {
         "fields": {
             "sku": { "type": "string", "index": true },
             "name": { "type": "string", "index": true },
+            "stock": { "type": "number", "index": true },
             "price": { "type": "number" },
             "attributes": { "type": "object", "allow": ["color", "size"] }
         },
-        "filters": ["sku"],
+        "filters": ["sku", "stock"],
         "sort": ["seq", "name"],
         "cache": { "shared_max_age": 300 }
     }))
@@ -253,8 +254,9 @@ async fn a_listing_validator_moves_when_a_record_is_deleted(pool: PgPool) {
 async fn an_unknown_query_parameter_is_refused(pool: PgPool) {
     let app = app(pool);
     for uri in [
-        "/v1/sap-stage/catalog.product?filter[sku]=SW-1",
         "/v1/sap-stage/catalog.product?limit=10&offset=20",
+        "/v1/sap-stage/catalog.product?limit=1&limit=2",
+        "/v1/sap-stage/catalog.product?limit=all",
     ] {
         let (status, _, body) = get(&app, uri, None).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{uri} should be refused");
@@ -568,4 +570,141 @@ async fn cache_directives_come_from_the_collection(pool: PgPool) {
         cache_control("/v1/sap-stage/catalog.category").await,
         "public, s-maxage=600"
     );
+}
+
+#[sqlx::test(migrations = "../store/migrations")]
+async fn a_declared_filter_narrows_a_listing(pool: PgPool) {
+    let store = PostgresStore::from_pool(pool.clone());
+    store
+        .upsert(&key("SW1"), &json!({ "sku": "SW-1", "stock": 3 }))
+        .await
+        .expect("stored");
+    store
+        .upsert(&key("SW2"), &json!({ "sku": "SW-2", "stock": 0 }))
+        .await
+        .expect("stored");
+    store
+        .upsert(&key("SW3"), &json!({ "sku": "SW-3", "stock": 3 }))
+        .await
+        .expect("stored");
+    let app = app(pool);
+
+    let (status, _, body) = get(&app, "/v1/sap-stage/catalog.product?filter[stock]=3", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let ids: Vec<&str> = body["records"]
+        .as_array()
+        .expect("records")
+        .iter()
+        .map(|record| record["id"].as_str().expect("id"))
+        .collect();
+    assert_eq!(ids, ["SW1", "SW3"]);
+
+    let (_, _, both) = get(
+        &app,
+        "/v1/sap-stage/catalog.product?filter[stock]=3&filter[sku]=SW-3",
+        None,
+    )
+    .await;
+    assert_eq!(
+        both["records"].as_array().expect("records").len(),
+        1,
+        "filters compose"
+    );
+}
+
+#[sqlx::test(migrations = "../store/migrations")]
+async fn a_field_the_schema_does_not_declare_filterable_is_refused(pool: PgPool) {
+    let app = app(pool);
+
+    // `price` is a declared field, but not a declared filter: filtering on it would be a query on
+    // a field nobody indexed.
+    let (status, _, body) = get(
+        &app,
+        "/v1/sap-stage/catalog.product?filter[price]=9.99",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "invalid_filter");
+
+    let (status, _, body) = get(
+        &app,
+        "/v1/sap-stage/catalog.product?filter[colour]=red",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "invalid_filter");
+
+    // A JSON path is not a field name, which is what keeps filtering out of the payload's interior.
+    let (status, _, _) = get(
+        &app,
+        "/v1/sap-stage/catalog.product?filter[attributes.color]=red",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[sqlx::test(migrations = "../store/migrations")]
+async fn a_filter_value_of_the_wrong_type_is_refused(pool: PgPool) {
+    // Not an empty result: a number field filtered with a word is a mistake, and saying so is the
+    // difference between a five-second fix and an afternoon.
+    let (status, _, body) = get(
+        &app(pool),
+        "/v1/sap-stage/catalog.product?filter[stock]=plenty",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "invalid_filter");
+}
+
+#[sqlx::test(migrations = "../store/migrations")]
+async fn a_filtered_page_has_its_own_validator(pool: PgPool) {
+    let store = PostgresStore::from_pool(pool.clone());
+    store
+        .upsert(&key("SW1"), &json!({ "sku": "SW-1", "stock": 3 }))
+        .await
+        .expect("stored");
+    let app = app(pool);
+
+    let (_, unfiltered, _) = get(&app, "/v1/sap-stage/catalog.product", None).await;
+    let (_, filtered, _) = get(&app, "/v1/sap-stage/catalog.product?filter[stock]=3", None).await;
+    let (_, other, _) = get(&app, "/v1/sap-stage/catalog.product?filter[stock]=4", None).await;
+
+    let unfiltered = unfiltered.expect("etag");
+    let filtered = filtered.expect("etag");
+    assert_ne!(
+        unfiltered, filtered,
+        "a filtered page is a different representation"
+    );
+    assert_ne!(
+        filtered,
+        other.expect("etag"),
+        "so is a differently filtered one"
+    );
+
+    // And the filtered page still answers conditionally.
+    let (status, _, _) = get(
+        &app,
+        "/v1/sap-stage/catalog.product?filter[stock]=3",
+        Some(&filtered),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_MODIFIED);
+}
+
+#[sqlx::test(migrations = "../store/migrations")]
+async fn the_change_feed_takes_no_filter(pool: PgPool) {
+    // Deliberate: a record that stops matching would leave a filtered feed with no entry at all, so
+    // a consumer replicating it would keep serving a record that no longer belongs to its view.
+    let (status, _, body) = get(
+        &app(pool),
+        "/v1/sap-stage/catalog.product/changes?filter[stock]=3",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "invalid_query");
 }
