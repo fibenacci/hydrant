@@ -39,6 +39,58 @@ pub struct IngestRecord {
     pub payload: Value,
 }
 
+/// How many records a listing may return.
+///
+/// The cap is enforced here rather than at the HTTP edge, and it is a clamp rather than a
+/// rejection: a public endpoint that returns whatever `?limit=` asked for is a denial-of-service
+/// vector, and one that 400s on a large limit only moves the problem into the client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PageLimit(u16);
+
+impl PageLimit {
+    /// The largest page the store will ever return, whatever the request asked for.
+    pub const MAX: u16 = 1000;
+
+    /// The page size used when a request does not ask for one.
+    pub const DEFAULT: u16 = 100;
+
+    /// Clamps `requested` into `1..=MAX`.
+    #[must_use]
+    pub const fn clamp(requested: u16) -> Self {
+        if requested == 0 {
+            Self(1)
+        } else if requested > Self::MAX {
+            Self(Self::MAX)
+        } else {
+            Self(requested)
+        }
+    }
+
+    /// The clamped page size.
+    #[must_use]
+    pub const fn get(self) -> u16 {
+        self.0
+    }
+}
+
+impl Default for PageLimit {
+    fn default() -> Self {
+        Self(Self::DEFAULT)
+    }
+}
+
+/// One page of a listing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Page {
+    /// The records in feed order.
+    pub records: Vec<StoredRecord>,
+    /// The cursor to pass as `after` for the next page, or `None` when the page was not full.
+    ///
+    /// Pagination is cursor-based on `seq`, never offset-based: an offset over a table that is
+    /// being written to produces duplicates and gaps.
+    pub next: Option<Seq>,
+}
+
 /// What an upsert did.
 ///
 /// The distinction is the whole point of hashing content: a sender may push the same payload as
@@ -88,5 +140,18 @@ impl Deletion {
             Self::Tombstoned { seq } => Some(seq),
             Self::Unchanged => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PageLimit;
+
+    #[test]
+    fn a_limit_is_clamped_rather_than_rejected() {
+        assert_eq!(PageLimit::clamp(50).get(), 50);
+        assert_eq!(PageLimit::clamp(0).get(), 1);
+        assert_eq!(PageLimit::clamp(u16::MAX).get(), PageLimit::MAX);
+        assert_eq!(PageLimit::default().get(), PageLimit::DEFAULT);
     }
 }

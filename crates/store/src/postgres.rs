@@ -1,12 +1,14 @@
 //! PostgreSQL implementation of [`Store`].
 
-use hydrant_core::{CollectionName, ContentHash, RecordKey, Seq, SourceName, content_hash};
+use hydrant_core::{
+    CollectionName, ContentHash, RecordId, RecordKey, Seq, SourceName, content_hash,
+};
 use serde_json::Value;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgExecutor, PgPool};
 
 use crate::error::StoreError;
-use crate::record::{Deletion, IngestRecord, StoredRecord, Upsert};
+use crate::record::{Deletion, IngestRecord, Page, PageLimit, StoredRecord, Upsert};
 use crate::store::Store;
 
 /// A store backed by PostgreSQL.
@@ -109,6 +111,79 @@ impl Store for PostgresStore {
             Some(seq) => Ok(Deletion::Tombstoned { seq: to_seq(seq)? }),
             None => Ok(Deletion::Unchanged),
         }
+    }
+
+    async fn list(
+        &self,
+        source: &SourceName,
+        collection: &CollectionName,
+        after: Option<Seq>,
+        limit: PageLimit,
+    ) -> Result<Page, StoreError> {
+        let after = i64::try_from(after.map_or(0, Seq::get)).map_err(|_| StoreError::Corrupt {
+            reason: "cursor is beyond the range of a bigint".to_owned(),
+        })?;
+        let rows = sqlx::query!(
+            r#"
+            SELECT id, seq, payload, content_hash, ingested_at, deleted_at
+              FROM record
+             WHERE source = $1
+               AND collection = $2
+               AND deleted_at IS NULL
+               AND seq > $3
+             ORDER BY seq
+             LIMIT $4
+            "#,
+            source.as_str(),
+            collection.as_str(),
+            after,
+            i64::from(limit.get()),
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let full_page = rows.len() == usize::from(limit.get());
+        let mut records = Vec::with_capacity(rows.len());
+        for row in rows {
+            let id = RecordId::new(row.id).map_err(|error| StoreError::Corrupt {
+                reason: format!("stored id is not a usable identifier: {error}"),
+            })?;
+            records.push(StoredRecord {
+                key: RecordKey::new(source.clone(), collection.clone(), id),
+                payload: row.payload,
+                content_hash: to_content_hash(&row.content_hash)?,
+                seq: to_seq(row.seq)?,
+                ingested_at: row.ingested_at,
+                deleted_at: row.deleted_at,
+            });
+        }
+
+        // Only a full page promises there may be more. A short page ends the walk, which is what
+        // lets a consumer stop without a second request.
+        let next = if full_page {
+            records.last().map(|record| record.seq)
+        } else {
+            None
+        };
+        Ok(Page { records, next })
+    }
+
+    async fn max_seq(
+        &self,
+        source: &SourceName,
+        collection: &CollectionName,
+    ) -> Result<Option<Seq>, StoreError> {
+        let max = sqlx::query_scalar!(
+            r#"
+            SELECT max(seq) FROM record WHERE source = $1 AND collection = $2
+            "#,
+            source.as_str(),
+            collection.as_str(),
+        )
+        .fetch_one(&self.pool)
+        .await?;
+
+        max.map(to_seq).transpose()
     }
 
     async fn get(&self, key: &RecordKey) -> Result<Option<StoredRecord>, StoreError> {

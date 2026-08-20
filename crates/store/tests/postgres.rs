@@ -8,7 +8,7 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use hydrant_core::{CollectionName, ContentHash, RecordId, RecordKey, SourceName};
-use hydrant_store::{Deletion, IngestRecord, PostgresStore, Store, StoreError, Upsert};
+use hydrant_store::{Deletion, IngestRecord, PageLimit, PostgresStore, Store, StoreError, Upsert};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 
@@ -312,5 +312,106 @@ async fn the_schema_refuses_a_hash_of_the_wrong_width(pool: PgPool) -> sqlx::Res
         error.to_string().contains("record_content_hash_is_sha256"),
         "unexpected error: {error}"
     );
+    Ok(())
+}
+
+#[sqlx::test]
+async fn a_listing_walks_the_collection_in_feed_order(pool: PgPool) -> Result<(), StoreError> {
+    let store = PostgresStore::from_pool(pool);
+    for id in ["SW1", "SW2", "SW3"] {
+        store.upsert(&key(id), &json!({ "sku": id })).await?;
+    }
+
+    let first = store
+        .list(
+            &source(),
+            &collection("catalog.product"),
+            None,
+            PageLimit::clamp(2),
+        )
+        .await?;
+    assert_eq!(first.records.len(), 2);
+    assert_eq!(first.records[0].key.id.as_str(), "SW1");
+    assert_eq!(first.records[1].key.id.as_str(), "SW2");
+    let cursor = first.next.expect("a full page offers a cursor");
+
+    let second = store
+        .list(
+            &source(),
+            &collection("catalog.product"),
+            Some(cursor),
+            PageLimit::clamp(2),
+        )
+        .await?;
+    assert_eq!(second.records.len(), 1);
+    assert_eq!(second.records[0].key.id.as_str(), "SW3");
+    assert_eq!(second.next, None, "a short page ends the walk");
+    Ok(())
+}
+
+#[sqlx::test]
+async fn a_listing_does_not_serve_tombstones(pool: PgPool) -> Result<(), StoreError> {
+    let store = PostgresStore::from_pool(pool);
+    store.upsert(&key("SW1"), &json!({ "sku": "SW-1" })).await?;
+    store.upsert(&key("SW2"), &json!({ "sku": "SW-2" })).await?;
+    store.delete(&key("SW1")).await?;
+
+    let page = store
+        .list(
+            &source(),
+            &collection("catalog.product"),
+            None,
+            PageLimit::default(),
+        )
+        .await?;
+    let ids: Vec<&str> = page
+        .records
+        .iter()
+        .map(|record| record.key.id.as_str())
+        .collect();
+    assert_eq!(ids, ["SW2"]);
+    Ok(())
+}
+
+#[sqlx::test]
+async fn an_unknown_collection_lists_empty(pool: PgPool) -> Result<(), StoreError> {
+    let store = PostgresStore::from_pool(pool);
+    let page = store
+        .list(
+            &source(),
+            &collection("catalog.nothing"),
+            None,
+            PageLimit::default(),
+        )
+        .await?;
+    assert!(page.records.is_empty());
+    assert_eq!(page.next, None);
+    Ok(())
+}
+
+#[sqlx::test]
+async fn the_cache_validator_moves_when_a_record_is_deleted(
+    pool: PgPool,
+) -> Result<(), StoreError> {
+    let store = PostgresStore::from_pool(pool);
+    let products = collection("catalog.product");
+    assert_eq!(store.max_seq(&source(), &products).await?, None);
+
+    store.upsert(&key("SW1"), &json!({ "sku": "SW-1" })).await?;
+    let after_write = store
+        .max_seq(&source(), &products)
+        .await?
+        .expect("a position");
+
+    // A deletion changes what the collection serves, so it has to invalidate a cached listing -
+    // even though the record itself is no longer listed.
+    let tombstone = store.delete(&key("SW1")).await?.seq().expect("tombstoned");
+    let after_delete = store
+        .max_seq(&source(), &products)
+        .await?
+        .expect("a position");
+
+    assert!(after_delete > after_write);
+    assert_eq!(after_delete, tombstone);
     Ok(())
 }

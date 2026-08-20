@@ -4,7 +4,9 @@ use hydrant_core::{CollectionName, RecordKey, SourceName};
 use serde_json::Value;
 
 use crate::error::StoreError;
-use crate::record::{Deletion, IngestRecord, StoredRecord, Upsert};
+use hydrant_core::Seq;
+
+use crate::record::{Deletion, IngestRecord, Page, PageLimit, StoredRecord, Upsert};
 
 /// What hydrant needs from a store.
 ///
@@ -53,6 +55,37 @@ pub trait Store: Send + Sync {
     ///
     /// Returns [`StoreError`] if the database rejects the write.
     fn delete(&self, key: &RecordKey) -> impl Future<Output = Result<Deletion, StoreError>> + Send;
+
+    /// Reads one page of a collection in feed order, tombstones excluded.
+    ///
+    /// Tombstones are left out because a listing serves what is public now; a consumer that needs
+    /// to observe deletions replicates the change feed instead.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] if the database rejects the query or a row cannot be read back as a
+    /// record.
+    fn list(
+        &self,
+        source: &SourceName,
+        collection: &CollectionName,
+        after: Option<Seq>,
+        limit: PageLimit,
+    ) -> impl Future<Output = Result<Page, StoreError>> + Send;
+
+    /// The highest feed position in a collection, tombstones included.
+    ///
+    /// This is the collection's cache validator. Tombstones count: a deletion changes what the
+    /// collection serves, so it has to invalidate a cached listing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] if the database rejects the query.
+    fn max_seq(
+        &self,
+        source: &SourceName,
+        collection: &CollectionName,
+    ) -> impl Future<Output = Result<Option<Seq>, StoreError>> + Send;
 
     /// Reads one record, tombstones included — a caller replicating the feed has to see them.
     ///
