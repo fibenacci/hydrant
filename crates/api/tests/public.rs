@@ -12,7 +12,8 @@ use axum::http::header::{CACHE_CONTROL, ETAG, IF_NONE_MATCH};
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use hydrant_api::{ApiState, router};
-use hydrant_core::{CollectionName, RecordId, RecordKey, SourceName};
+use hydrant_core::schema::CollectionSchema;
+use hydrant_core::{CollectionName, RecordId, RecordKey, SchemaSet, SourceName};
 use hydrant_store::{PostgresStore, Store};
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -26,8 +27,37 @@ fn key(id: &str) -> RecordKey {
     )
 }
 
+/// Two collections: the example one, and a second that keeps a longer shared cache so the
+/// per-collection directive is actually observable.
+fn schemas() -> SchemaSet {
+    let product: CollectionSchema = serde_json::from_value(json!({
+        "collection": "catalog.product",
+        "id": "$.id",
+        "fields": {
+            "sku": { "type": "string", "index": true },
+            "name": { "type": "string", "index": true },
+            "price": { "type": "number" },
+            "attributes": { "type": "object", "allow": ["color", "size"] }
+        },
+        "filters": ["sku"],
+        "sort": ["seq", "name"],
+        "cache": { "shared_max_age": 300 }
+    }))
+    .expect("valid product schema");
+
+    let category: CollectionSchema = serde_json::from_value(json!({
+        "collection": "catalog.category",
+        "id": "$.id",
+        "fields": { "name": { "type": "string" } },
+        "cache": { "shared_max_age": 600 }
+    }))
+    .expect("valid category schema");
+
+    SchemaSet::new([product, category]).expect("distinct collections")
+}
+
 fn app(pool: PgPool) -> Router {
-    router(ApiState::new(PostgresStore::from_pool(pool), 300))
+    router(ApiState::new(PostgresStore::from_pool(pool), schemas()))
 }
 
 /// One request. Returns status, the `ETag` if there was one, and the parsed body.
@@ -486,4 +516,56 @@ async fn the_feed_route_shadows_a_record_of_the_same_name(pool: PgPool) {
         "the feed answers, not the record"
     );
     assert!(!body.to_string().contains("unreachable") || body["changes"][0]["id"] == "changes");
+}
+
+#[sqlx::test(migrations = "../store/migrations")]
+async fn an_undeclared_collection_is_absent_rather_than_empty(pool: PgPool) {
+    // An empty page would tell a consumer it had replicated a collection that does not exist. The
+    // schema set is what makes a collection real, so an undeclared name is a 404 everywhere.
+    let app = app(pool);
+    for uri in [
+        "/v1/sap-stage/catalog.nothing",
+        "/v1/sap-stage/catalog.nothing/SW1",
+        "/v1/sap-stage/catalog.nothing/changes",
+        "/v1/sap-stage/catalog.nothing/manifest",
+    ] {
+        let (status, _, body) = get(&app, uri, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{uri}");
+        assert_eq!(body["error"]["code"], "unknown_collection", "{uri}");
+    }
+}
+
+#[sqlx::test(migrations = "../store/migrations")]
+async fn cache_directives_come_from_the_collection(pool: PgPool) {
+    let app = app(pool);
+    let cache_control = |uri: &'static str| {
+        let app = app.clone();
+        async move {
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            response
+                .headers()
+                .get(CACHE_CONTROL)
+                .expect("cache-control")
+                .to_str()
+                .expect("ascii")
+                .to_owned()
+        }
+    };
+
+    assert_eq!(
+        cache_control("/v1/sap-stage/catalog.product").await,
+        "public, s-maxage=300"
+    );
+    assert_eq!(
+        cache_control("/v1/sap-stage/catalog.category").await,
+        "public, s-maxage=600"
+    );
 }

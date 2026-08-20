@@ -2,25 +2,28 @@
 
 use std::sync::Arc;
 
-/// Shared state behind the public routes.
+use hydrant_core::SchemaSet;
+
+/// Shared state behind the routes.
 ///
-/// `shared_max_age` is a single value for now. Per-collection cache directives are declared in the
-/// collection schema, and start being honoured once schema loading exists.
+/// The schema set is what makes a collection exist: a name that is not declared is a 404, not an
+/// empty page. Cache directives come from the collection's own definition, so an operator can say
+/// per collection how long a shared cache may keep it.
 #[derive(Debug)]
 pub struct ApiState<S> {
     /// The store to read from.
     pub store: Arc<S>,
-    /// `s-maxage` in seconds, sent on every cacheable response.
-    pub shared_max_age: u32,
+    /// Every collection the service serves.
+    pub schemas: Arc<SchemaSet>,
 }
 
 impl<S> ApiState<S> {
-    /// Wraps a store.
+    /// Wraps a store and the collections it serves.
     #[must_use]
-    pub fn new(store: S, shared_max_age: u32) -> Self {
+    pub fn new(store: S, schemas: SchemaSet) -> Self {
         Self {
             store: Arc::new(store),
-            shared_max_age,
+            schemas: Arc::new(schemas),
         }
     }
 }
@@ -31,7 +34,7 @@ impl<S> Clone for ApiState<S> {
     fn clone(&self) -> Self {
         Self {
             store: Arc::clone(&self.store),
-            shared_max_age: self.shared_max_age,
+            schemas: Arc::clone(&self.schemas),
         }
     }
 }

@@ -14,6 +14,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::header::{CACHE_CONTROL, ETAG};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
+use hydrant_core::schema::CollectionSchema;
 use hydrant_core::{CollectionName, RecordId, RecordKey, Seq, SourceName};
 use hydrant_store::{PageLimit, Store};
 use serde::{Deserialize, Serialize};
@@ -77,6 +78,7 @@ pub async fn list_collection<S: Store>(
 ) -> Result<Response, ApiError> {
     let source = parse::<SourceName>(&source, "source")?;
     let collection = parse::<CollectionName>(&collection, "collection")?;
+    let max_age = shared_max_age(&state, &collection)?;
     let Query(query) = query.map_err(|rejection| ApiError::BadRequest {
         code: "invalid_query",
         message: rejection.body_text(),
@@ -90,7 +92,7 @@ pub async fn list_collection<S: Store>(
     let max_seq = state.store.max_seq(&source, &collection).await?;
     let etag = validator("l", max_seq, cursor, Some(limit));
     if is_fresh(&headers, &etag) {
-        return Ok(not_modified(&state, &etag));
+        return Ok(not_modified(max_age, &etag));
     }
 
     let page = state
@@ -98,7 +100,7 @@ pub async fn list_collection<S: Store>(
         .list(&source, &collection, cursor, limit)
         .await?;
     let body = PageBody::new(page, max_seq.map_or(0, Seq::get));
-    Ok((cache_headers(&state, &etag), Json(body)).into_response())
+    Ok((cache_headers(max_age, &etag), Json(body)).into_response())
 }
 
 /// `GET /v1/{source}/{collection}/{id}`
@@ -115,9 +117,11 @@ pub async fn get_record<S: Store>(
     Path((source, collection, id)): Path<(String, String, String)>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
+    let collection = parse::<CollectionName>(&collection, "collection")?;
+    let max_age = shared_max_age(&state, &collection)?;
     let key = RecordKey::new(
         parse::<SourceName>(&source, "source")?,
-        parse::<CollectionName>(&collection, "collection")?,
+        collection,
         parse::<RecordId>(&id, "record id")?,
     );
 
@@ -130,9 +134,13 @@ pub async fn get_record<S: Store>(
 
     let etag = quoted(&record.content_hash.to_hex());
     if is_fresh(&headers, &etag) {
-        return Ok(not_modified(&state, &etag));
+        return Ok(not_modified(max_age, &etag));
     }
-    Ok((cache_headers(&state, &etag), Json(RecordBody::from(record))).into_response())
+    Ok((
+        cache_headers(max_age, &etag),
+        Json(RecordBody::from(record)),
+    )
+        .into_response())
 }
 
 /// `GET /v1/{source}/{collection}/changes`
@@ -152,6 +160,7 @@ pub async fn changes<S: Store>(
 ) -> Result<Response, ApiError> {
     let source = parse::<SourceName>(&source, "source")?;
     let collection = parse::<CollectionName>(&collection, "collection")?;
+    let max_age = shared_max_age(&state, &collection)?;
     let Query(query) = query.map_err(|rejection| ApiError::BadRequest {
         code: "invalid_query",
         message: rejection.body_text(),
@@ -165,7 +174,7 @@ pub async fn changes<S: Store>(
     let max_seq = state.store.max_seq(&source, &collection).await?;
     let etag = validator("c", max_seq, since, Some(limit));
     if is_fresh(&headers, &etag) {
-        return Ok(not_modified(&state, &etag));
+        return Ok(not_modified(max_age, &etag));
     }
 
     let page = state
@@ -173,7 +182,7 @@ pub async fn changes<S: Store>(
         .changes(&source, &collection, since, limit)
         .await?;
     let body = ChangesBody::new(page, max_seq.map_or(0, Seq::get));
-    Ok((cache_headers(&state, &etag), Json(body)).into_response())
+    Ok((cache_headers(max_age, &etag), Json(body)).into_response())
 }
 
 /// `GET /v1/{source}/{collection}/manifest`
@@ -191,18 +200,19 @@ pub async fn manifest<S: Store>(
 ) -> Result<Response, ApiError> {
     let source = parse::<SourceName>(&source, "source")?;
     let collection = parse::<CollectionName>(&collection, "collection")?;
+    let max_age = shared_max_age(&state, &collection)?;
 
     let max_seq = state.store.max_seq(&source, &collection).await?;
     // The manifest is a function of the collection's state, and every change moves the feed
     // position - so the position alone determines this representation.
     let etag = validator("m", max_seq, None, None);
     if is_fresh(&headers, &etag) {
-        return Ok(not_modified(&state, &etag));
+        return Ok(not_modified(max_age, &etag));
     }
 
     let manifest = state.store.manifest(&source, &collection).await?;
     Ok((
-        cache_headers(&state, &etag),
+        cache_headers(max_age, &etag),
         Json(ManifestBody::from(manifest)),
     )
         .into_response())
@@ -247,18 +257,39 @@ fn quoted(value: &str) -> String {
     format!("\"{value}\"")
 }
 
+/// The collection's declared `s-maxage`, or a 404 if the collection is not served at all.
+fn shared_max_age<S>(state: &ApiState<S>, collection: &CollectionName) -> Result<u32, ApiError> {
+    schema(state, collection).map(|schema| schema.cache().shared_max_age)
+}
+
+/// The collection's definition, or a 404. A collection exists because a schema declares it — an
+/// undeclared name serving an empty page would tell a consumer it had replicated nothing, rather
+/// than that it asked for the wrong thing.
+fn schema<'a, S>(
+    state: &'a ApiState<S>,
+    collection: &CollectionName,
+) -> Result<&'a CollectionSchema, ApiError> {
+    state
+        .schemas
+        .get(collection)
+        .ok_or(ApiError::UnknownCollection)
+}
+
 /// `ETag` plus `Cache-Control`, the pair every cacheable response carries.
-fn cache_headers<S>(state: &ApiState<S>, etag: &str) -> [(HeaderName, HeaderValue); 2] {
+fn cache_headers(shared_max_age: u32, etag: &str) -> [(HeaderName, HeaderValue); 2] {
     // Both values are built from a hex digest, decimal digits and a fixed prefix, so they cannot
     // fail to parse as header values. The fallback keeps that assumption from becoming a panic.
     let etag = HeaderValue::from_str(etag).unwrap_or(HeaderValue::from_static("\"\""));
-    let cache_control =
-        HeaderValue::from_str(&format!("public, s-maxage={}", state.shared_max_age))
-            .unwrap_or(HeaderValue::from_static("public"));
+    let cache_control = HeaderValue::from_str(&format!("public, s-maxage={shared_max_age}"))
+        .unwrap_or(HeaderValue::from_static("public"));
     [(ETAG, etag), (CACHE_CONTROL, cache_control)]
 }
 
 /// A 304 carries the validator and the caching directives, and no body.
-fn not_modified<S>(state: &ApiState<S>, etag: &str) -> Response {
-    (StatusCode::NOT_MODIFIED, cache_headers(state, etag)).into_response()
+fn not_modified(shared_max_age: u32, etag: &str) -> Response {
+    (
+        StatusCode::NOT_MODIFIED,
+        cache_headers(shared_max_age, etag),
+    )
+        .into_response()
 }

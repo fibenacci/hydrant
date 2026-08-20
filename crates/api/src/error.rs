@@ -20,6 +20,11 @@ pub enum ApiError {
         /// What was wrong, in words. Safe to show: it describes the request, never the store.
         message: String,
     },
+    /// No such collection: the name is not declared in any schema.
+    ///
+    /// Distinct from a missing record on purpose. "This collection does not exist" and "this record
+    /// does not exist" send a sender looking in different places.
+    UnknownCollection,
     /// No such record, or it has been deleted.
     NotFound,
     /// The store failed. The client learns nothing about why.
@@ -58,6 +63,11 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, code, message) = match self {
             Self::BadRequest { code, message } => (StatusCode::BAD_REQUEST, code, message),
+            Self::UnknownCollection => (
+                StatusCode::NOT_FOUND,
+                "unknown_collection",
+                "no collection of that name is served".to_owned(),
+            ),
             Self::NotFound => (
                 StatusCode::NOT_FOUND,
                 "not_found",
