@@ -845,6 +845,7 @@ name = "hydrant-api"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "form_urlencoded",
  "http-body-util",
  "hydrant-core",
  "hydrant-store",
