@@ -22,7 +22,10 @@ env:
     # A stale Cargo.lock fails CI instead of being silently updated.
     CARGO_LOCKED: '--locked'
     # Minimum supported Rust version, kept in sync with rust-version in Cargo.toml.
-    MSRV: '1.85.0'
+    MSRV: '1.88.0'
+    # sqlx verifies its queries at compile time against the committed .sqlx metadata, so every job
+    # but the test job builds without a database. The test job checks that metadata is current.
+    SQLX_OFFLINE: 'true'
 
 # Third-party actions are pinned to a commit SHA, with the human-readable version
 # in a trailing comment: a mutable tag is a supply-chain hole in a workflow that
@@ -128,6 +131,26 @@ jobs:
         name: Tests
         runs-on: ubuntu-latest
         timeout-minutes: 30
+        # The store is tested against PostgreSQL, not against a mock: idempotency lives in an
+        # ON CONFLICT clause and tombstones in check constraints, and neither can be verified
+        # anywhere else. Same image digest as compose.yaml.
+        services:
+            postgres:
+                image: postgres:18-alpine@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2
+                env:
+                    POSTGRES_DB: hydrant
+                    POSTGRES_USER: hydrant
+                    POSTGRES_PASSWORD: hydrant
+                    POSTGRES_INITDB_ARGS: --locale=C --encoding=UTF8
+                ports:
+                    -   5432:5432
+                options: >-
+                    --health-cmd "pg_isready -U hydrant -d hydrant"
+                    --health-interval 2s
+                    --health-timeout 3s
+                    --health-retries 15
+        env:
+            DATABASE_URL: postgres://hydrant:hydrant@localhost:5432/hydrant
         steps:
             -   uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
                 with:
@@ -136,7 +159,15 @@ jobs:
             -   uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
             -   uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532 # v2.86.3
                 with:
-                    tool: cargo-nextest
+                    # sqlx-cli is pinned to the sqlx version in Cargo.toml: a newer CLI writes
+                    # metadata the library cannot read.
+                    tool: cargo-nextest,sqlx-cli@0.8.6
+            -   name: Apply migrations
+                run: make migrate
+            -   name: Committed query metadata is current
+                env:
+                    SQLX_OFFLINE: 'false'
+                run: make sqlx-check
             -   id: nextest
                 run: make test-junit
             -   id: doctests

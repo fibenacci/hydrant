@@ -94,8 +94,17 @@ doctest: ## Run documentation tests
 # ---------------------------------------------------------------------------
 
 .PHONY: ci
-ci: quality security test doctest ## Run the full pipeline locally (all gates)
+ci: quality security sqlx-verify test doctest ## Run the full pipeline locally (all gates)
 	@echo "All local CI gates passed."
+
+# Contributors are not required to install sqlx-cli; CI always runs this gate.
+.PHONY: sqlx-verify
+sqlx-verify: ## Verify .sqlx if sqlx-cli is installed, otherwise say so
+	@if $(CARGO) sqlx --version >/dev/null 2>&1; then \
+		$(MAKE) sqlx-check; \
+	else \
+		echo "sqlx-cli not installed - skipping the .sqlx check (CI runs it)"; \
+	fi
 
 # ---------------------------------------------------------------------------
 ##@ Build
@@ -108,6 +117,28 @@ build: ## Debug build of the whole workspace
 .PHONY: release
 release: ## Optimized release build
 	$(CARGO) build --release --workspace $(CARGO_LOCKED)
+
+# ---------------------------------------------------------------------------
+##@ Database schema
+# ---------------------------------------------------------------------------
+#
+# Queries are verified at compile time against the metadata in .sqlx, which is
+# committed. That is what lets every CI job except the test job build without a
+# database - and what makes a query change visible in review.
+
+MIGRATIONS ?= crates/store/migrations
+
+.PHONY: migrate
+migrate: ## Apply migrations to $DATABASE_URL
+	$(CARGO) sqlx migrate run --source $(MIGRATIONS)
+
+.PHONY: sqlx-prepare
+sqlx-prepare: ## Regenerate .sqlx from the queries in the code (needs a live database)
+	$(CARGO) sqlx prepare --workspace -- --all-targets
+
+.PHONY: sqlx-check
+sqlx-check: ## Verify .sqlx still matches the queries (CI: Tests)
+	SQLX_OFFLINE=false $(CARGO) sqlx prepare --check --workspace -- --all-targets
 
 # ---------------------------------------------------------------------------
 ##@ Local environment
