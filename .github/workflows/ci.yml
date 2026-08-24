@@ -105,7 +105,7 @@ jobs:
             -   uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
                 with:
                     persist-credentials: false
-            -   uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532 # v2.86.3
+            -   uses: taiki-e/install-action@ba47c86ac325773530516bb756137ac718732518 # v2.86.5
                 with:
                     tool: cargo-deny
             -   run: make deny
@@ -121,11 +121,11 @@ jobs:
             -   uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
                 with:
                     persist-credentials: false
-            -   uses: github/codeql-action/init@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
+            -   uses: github/codeql-action/init@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4.37.8
                 with:
                     languages: rust
                     build-mode: none
-            -   uses: github/codeql-action/analyze@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
+            -   uses: github/codeql-action/analyze@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4.37.8
 
     test:
         name: Tests
@@ -157,7 +157,7 @@ jobs:
                     persist-credentials: false
             -   uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
             -   uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-            -   uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532 # v2.86.3
+            -   uses: taiki-e/install-action@ba47c86ac325773530516bb756137ac718732518 # v2.86.5
                 with:
                     # sqlx-cli is pinned to the sqlx version in Cargo.toml: a newer CLI writes
                     # metadata the library cannot read.
